@@ -199,7 +199,7 @@ append_or_create_config(){
     "clients": [ { "id": "$CLIENT_ID" } ],
     "decryption": "$VLESS_DECRYPTION",
     "encryption": "$VLESS_ENCRYPTION",
-    "authentication": "ML-KEM-768"
+    "selectedAuth": "ML-KEM-768, Post-Quantum"
   },
   "tag": "$VLESS_TAG",
   "streamSettings": { "network": "tcp" }
