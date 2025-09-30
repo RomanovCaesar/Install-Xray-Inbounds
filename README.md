@@ -11,7 +11,7 @@ curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/ma
 
 If problem occured, try:
 ```bash
-curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/uninstall_ss2022_xray.sh -o uninstall_ss2022_xray.sh && chmod +x uninstall_ss2022_xray.sh && sudo ./uninstall_ss2022_xray.sh
+curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/uninstall_xray.sh -o uninstall_xray.sh && chmod +x uninstall_xray.sh && sudo ./uninstall_xray.sh
 ```
 
 Enjoy it! 
