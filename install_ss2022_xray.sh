@@ -2,7 +2,7 @@
 # install_ss2022_xray.sh
 # 安装/追加 Xray 的 Shadowsocks-2022 入站（2022-blake3-aes-256-gcm）
 # 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；
-# 检测旧配置则追加 inbound；新增：端口冲突检测（配置内&系统监听）
+# 检测旧配置则追加 inbound；检测端口冲突（配置内&系统监听）；自动生成唯一 tag
 set -euo pipefail
 
 die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
@@ -100,16 +100,13 @@ port_in_config_inuse() {
 port_in_system_inuse() {
   local p="$1"
   if command -v ss >/dev/null 2>&1; then
-    # TCP
-    if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)"; then return 0; fi
-    # UDP
-    if ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${p}([[:space:]]|$)"; then return 0; fi
+    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)" && return 0
+    ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${p}([[:space:]]|$)" && return 0
     return 1
   elif command -v netstat >/dev/null 2>&1; then
     netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)"
     return $?
   else
-    # 无法检测，默认认为未占用
     return 1
   fi
 }
@@ -172,6 +169,26 @@ backup_config_if_exists() {
   fi
 }
 
+# ===== 生成唯一 inbound tag =====
+generate_unique_tag() {
+  local cfg="/usr/local/etc/xray/config.json"
+  local base="ss-2022-in-${SS_PORT}"
+  SS_TAG="$base"
+
+  if [[ -s "$cfg" ]] && jq empty "$cfg" >/dev/null 2>&1; then
+    # 如果已存在相同 tag，则追加 -2、-3...
+    if jq -e --arg t "$SS_TAG" '((.inbounds // []) | map(.tag // "") | index($t)) != null' "$cfg" >/dev/null; then
+      local n=2
+      while :; do
+        SS_TAG="${base}-${n}"
+        jq -e --arg t "$SS_TAG" '((.inbounds // []) | map(.tag // "") | index($t)) == null' "$cfg" >/dev/null && break
+        n=$((n+1))
+      done
+    fi
+  fi
+  info "将使用 inbound tag：$SS_TAG"
+}
+
 append_or_create_config() {
   local cfg="/usr/local/etc/xray/config.json"
 
@@ -186,7 +203,7 @@ append_or_create_config() {
     "password": "$SS_KEY_B64",
     "network": "tcp,udp"
   },
-  "tag": "ss-2022-in"
+  "tag": "$SS_TAG"
 }
 EOF
 )"
@@ -320,6 +337,7 @@ PY
   echo "================ Shadowsocks 2022 配置信息 ================"
   echo "Method : $SS_METHOD"
   echo "Port   : $SS_PORT"
+  echo "Tag    : $SS_TAG"
   echo "Key(B64): $SS_KEY_B64"
   echo "Server : $SERVER_ADDR"
   echo
@@ -343,10 +361,11 @@ main() {
   detect_os
   ensure_packages
   prompt_domain
-  prompt_port_until_free     # 端口循环校验（配置 & 系统监听）
+  prompt_port_until_free
   install_xray
   generate_key
   backup_config_if_exists
+  generate_unique_tag      # <- 这里生成不会冲突的 tag
   append_or_create_config
   setup_service
   detect_address
