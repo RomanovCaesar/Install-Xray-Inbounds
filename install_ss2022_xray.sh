@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # install_ss2022_xray.sh
 # 安装/追加 Xray 的 Shadowsocks-2022 入站（2022-blake3-aes-256-gcm）
-# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；不会覆盖旧配置而是追加 inbound
+# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；
+# 检测旧配置则追加 inbound；新增：端口冲突检测（配置内&系统监听）
 set -euo pipefail
 
 die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
@@ -34,10 +35,10 @@ ensure_packages() {
     debian)
       apt-get update -y
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip xz-utils openssl python3 jq
+        ca-certificates curl unzip xz-utils openssl python3 jq net-tools iproute2
       ;;
     alpine)
-      apk add --no-cache ca-certificates curl unzip xz openssl python3 jq
+      apk add --no-cache ca-certificates curl unzip xz openssl python3 jq iproute2 net-tools
       ;;
   esac
 }
@@ -71,12 +72,63 @@ prompt_domain() {
   fi
 }
 
-prompt_port() {
+# ===== 端口输入与冲突检测 =====
+read_port_once() {
   local input
   read -rp "请输入 Shadowsocks 2022 入站端口（1-65535，默认 40000）： " input || true
   input="${input:-40000}"
   [[ "$input" =~ ^[0-9]+$ ]] && (( input>=1 && input<=65535 )) || die "端口无效：$input"
-  SS_PORT="$input"
+  echo "$input"
+}
+
+port_in_config_inuse() {
+  local cfg="/usr/local/etc/xray/config.json" p="$1"
+  [[ -s "$cfg" ]] || return 1
+  jq -e --argjson p "$p" '
+    try (
+      if .inbounds == null then
+        false
+      elif (.inbounds|type)!="array" then
+        (.inbounds.port? // empty) == $p
+      else
+        any(.inbounds[]?; (.port? // empty) == $p)
+      end
+    ) catch false
+  ' "$cfg" >/dev/null 2>&1
+}
+
+port_in_system_inuse() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    # TCP
+    if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)"; then return 0; fi
+    # UDP
+    if ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${p}([[:space:]]|$)"; then return 0; fi
+    return 1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)"
+    return $?
+  else
+    # 无法检测，默认认为未占用
+    return 1
+  fi
+}
+
+prompt_port_until_free() {
+  while :; do
+    local p; p="$(read_port_once)"
+    if port_in_config_inuse "$p"; then
+      warn "端口 $p 已在 Xray 现有配置的 inbounds 中使用，请换一个。"
+      continue
+    fi
+    if port_in_system_inuse "$p"; then
+      warn "端口 $p 已被系统中其它进程监听（TCP/UDP），请换一个。"
+      continue
+    fi
+    SS_PORT="$p"
+    info "将使用端口：$SS_PORT"
+    break
+  done
 }
 
 install_xray() {
@@ -123,7 +175,7 @@ backup_config_if_exists() {
 append_or_create_config() {
   local cfg="/usr/local/etc/xray/config.json"
 
-  # 生成将要追加的新 inbound（默认不启用 sniffing）
+  # 生成将要追加的新 inbound（不启用 sniffing）
   local new_inbound
   new_inbound="$(cat <<EOF
 {
@@ -141,11 +193,9 @@ EOF
 
   if [[ -s "$cfg" ]]; then
     info "检测到已有 Xray 配置，尝试追加一个 ss-2022 inbound ..."
-    # 校验 JSON 合法性
     if ! jq empty "$cfg" >/dev/null 2>&1; then
       die "现有配置不是有效 JSON，请手动检查：$cfg"
     fi
-    # 追加逻辑：若 .inbounds 不存在或不是数组，则创建为数组；否则直接追加
     local tmp; tmp="$(mktemp)"
     jq --argjson inbound "$new_inbound" '
       if .inbounds == null then
@@ -293,7 +343,7 @@ main() {
   detect_os
   ensure_packages
   prompt_domain
-  prompt_port
+  prompt_port_until_free     # 端口循环校验（配置 & 系统监听）
   install_xray
   generate_key
   backup_config_if_exists
