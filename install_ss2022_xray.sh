@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-#====================#
-#  Helper functions  #
-#====================#
 die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
 info(){ echo -e "\e[32m[INFO]\e[0m $*"; }
 warn(){ echo -e "\e[33m[WARN]\e[0m $*"; }
@@ -21,13 +18,11 @@ detect_os() {
   else
     die "无法检测系统类型（缺少 /etc/os-release）"
   fi
-
   case "$OS_ID" in
     debian|ubuntu) OS_FAMILY="debian" ;;
     alpine)        OS_FAMILY="alpine" ;;
     *)             die "当前系统不受支持：$OS_ID（仅支持 Debian/Ubuntu/Alpine）" ;;
   esac
-
   info "检测到系统：$PRETTY_NAME"
 }
 
@@ -36,10 +31,25 @@ ensure_packages() {
     debian)
       apt-get update -y
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip xz-utils openssl
+        ca-certificates curl unzip xz-utils openssl python3
       ;;
     alpine)
-      apk add --no-cache ca-certificates curl unzip xz openssl
+      apk add --no-cache ca-certificates curl unzip xz openssl python3
+      ;;
+  esac
+}
+
+create_xray_user() {
+  if id -u xray >/dev/null 2>&1; then
+    return
+  fi
+  case "$OS_FAMILY" in
+    debian)
+      adduser --system --no-create-home --shell /usr/sbin/nologin --group xray
+      ;;
+    alpine)
+      addgroup -S xray || true
+      adduser  -S -H -s /sbin/nologin -G xray xray
       ;;
   esac
 }
@@ -54,20 +64,16 @@ prompt_port() {
   SS_PORT="$input"
 }
 
-# 获取最新版本并下载 Xray
 install_xray() {
   local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
   info "获取 Xray 最新版本信息..."
   local tag
   tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
-  if [[ -z "${tag:-}" ]]; then
-    warn "无法从 GitHub API 获取最新版本，使用备用文件名"
-  else
-    info "最新版本：$tag"
-  fi
+  [[ -n "${tag:-}" ]] && info "最新版本：$tag" || warn "无法从 GitHub API 获取最新版本，使用 latest 直链"
 
-  local tmpdir; tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  local tmpdir=""
+  trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT
+  tmpdir="$(mktemp -d)"
 
   local zipname="Xray-linux-64.zip"
   local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
@@ -86,25 +92,15 @@ install_xray() {
   unzip -q -o "$tmpdir/xray.zip" -d "$tmpdir"
   install -m 0755 "$tmpdir/xray" /usr/local/bin/xray
 
-  # 创建运行用户与目录
-  if ! id -u xray >/dev/null 2>&1; then
-    if command -v adduser >/dev/null 2>&1; then
-      adduser --system --no-create-home --shell /usr/sbin/nologin xray || true
-    elif command -v adduser >/dev/null 2>&1 || command -v addgroup >/dev/null 2>&1; then
-      adduser -S -H -s /sbin/nologin xray || true
-    fi
-  fi
+  create_xray_user
   mkdir -p /usr/local/etc/xray
   chown -R xray:xray /usr/local/etc/xray
 }
 
 generate_key() {
-  # 32 字节原始密钥并以 Base64 编码（SIP002/常见客户端可直接使用）
   SS_METHOD="2022-blake3-aes-256-gcm"
   SS_KEY_B64="$(openssl rand -base64 32 | tr -d '\n')"
-  if [[ -z "$SS_KEY_B64" ]]; then
-    die "密钥生成失败（openssl rand）"
-  fi
+  [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
 }
 
 write_config() {
@@ -197,37 +193,27 @@ setup_service() {
 detect_public_ip() {
   local ipv4=""
   ipv4="$(curl -fsSL https://api.ipify.org || true)"
-  if [[ -z "$ipv4" ]]; then
-    ipv4="$(curl -fsSL http://ifconfig.me || true)"
-  fi
-  if [[ -z "$ipv4" ]]; then
-    ipv4="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
-  fi
-  if [[ -z "$ipv4" ]]; then
-    warn "无法自动探测公网 IP，请用你的服务器 IP 替换链接中的 <SERVER_IP>"
-    SERVER_IP="<SERVER_IP>"
-  else
-    SERVER_IP="$ipv4"
+  [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ifconfig.me || true)"
+  [[ -n "$ipv4" ]] || ipv4="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
+  SERVER_IP="${ipv4:-<SERVER_IP>}"
+  if [[ "$SERVER_IP" = "<SERVER_IP>" ]]; then
+    warn "无法自动探测公网 IP，请手动替换分享链接中的 <SERVER_IP>"
   fi
 }
 
 print_ss_uri() {
-  # 生成 SIP002 链接：ss://method:password@server:port#tag
-  # 注意：password 需 URL 编码
-  local enc_pw
-  enc_pw="$(python3 - <<PY
-import urllib.parse, os, sys
-pw = os.environ.get("PW","")
-print(urllib.parse.quote(pw, safe=''))
+  # 使用 python3 做 URL 编码，兼容 Alpine
+  local enc_pw tag_enc
+  enc_pw="$(python3 - <<'PY'
+import urllib.parse, os
+print(urllib.parse.quote(os.environ.get("PW",""), safe=''))
 PY
-  )"
-  local tag_enc
-  tag_enc="$(python3 - <<PY
+)"
+  tag_enc="$(python3 - <<'PY'
 import urllib.parse
 print(urllib.parse.quote("xray-ss2022", safe=''))
 PY
-  )"
-
+)"
   local uri="ss://${SS_METHOD}:${enc_pw}@${SERVER_IP}:${SS_PORT}#${tag_enc}"
 
   echo
@@ -242,9 +228,6 @@ PY
   echo "==========================================================="
 }
 
-#====================#
-#       Main         #
-#====================#
 main() {
   require_root
   detect_os
@@ -258,12 +241,12 @@ main() {
   PW="$SS_KEY_B64" print_ss_uri
 
   info "完成。可用命令："
-  if command -v systemctl >/devnull 2>&1; then
+  if command -v systemctl >/dev/null 2>&1; then
     echo "  systemctl status xray   # 查看运行状态"
     echo "  journalctl -u xray -e   # 查看日志"
   else
     echo "  rc-service xray status  # 查看运行状态（OpenRC）"
-    echo "  tail -n 200 /var/log/messages  # 查看日志（根据系统而定）"
+    echo "  rc-service xray restart # 重启服务"
   fi
 }
 
