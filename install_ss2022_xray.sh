@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install_ss2022_xray.sh
-# 一键安装 Xray + Shadowsocks-2022(2022-blake3-aes-256-gcm)，适配 Debian/Ubuntu/Alpine
+# 安装/追加 Xray 的 Shadowsocks-2022 入站（2022-blake3-aes-256-gcm）
+# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；不会覆盖旧配置而是追加 inbound
 set -euo pipefail
 
 die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
@@ -33,52 +34,40 @@ ensure_packages() {
     debian)
       apt-get update -y
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip xz-utils openssl python3
+        ca-certificates curl unzip xz-utils openssl python3 jq
       ;;
     alpine)
-      apk add --no-cache ca-certificates curl unzip xz openssl python3
+      apk add --no-cache ca-certificates curl unzip xz openssl python3 jq
       ;;
   esac
 }
 
 create_xray_user() {
-  if id -u xray >/dev/null 2>&1; then
-    return
-  fi
+  if id -u xray >/dev/null 2>&1; then return; fi
   case "$OS_FAMILY" in
-    debian)
-      adduser --system --no-create-home --shell /usr/sbin/nologin --group xray
-      ;;
-    alpine)
-      addgroup -S xray || true
-      adduser  -S -H -s /sbin/nologin -G xray xray
-      ;;
+    debian) adduser --system --no-create-home --shell /usr/sbin/nologin --group xray ;;
+    alpine) addgroup -S xray || true; adduser -S -H -s /sbin/nologin -G xray xray ;;
   esac
 }
 
-# 新增域名校验
+# ===== 域名输入与校验（可留空）=====
 is_valid_domain() {
   local d="$1"
-  [[ "$d" =~ ^[A-Za-z0-9.-]+$ ]] && [[ "$d" == *.* ]]
+  [[ "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]
 }
 
 prompt_domain() {
   local input
   read -rp "请输入要使用的域名（留空则使用公网 IP）： " input || true
-  # 去掉首尾空白
-  input="$(echo -n "$input" | awk '{$1=$1;print}')"
+  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # trim
   if [[ -z "$input" ]]; then
     SERVER_DOMAIN=""
     info "未输入域名，将在稍后使用公网 IP。"
   else
-    # 全小写
     input="${input,,}"
-    if is_valid_domain "$input"; then
-      SERVER_DOMAIN="$input"
-      info "将使用域名：$SERVER_DOMAIN"
-    else
-      die "域名格式无效：$input"
-    fi
+    is_valid_domain "$input" || die "域名格式无效：$input"
+    SERVER_DOMAIN="$input"
+    info "将使用域名：$SERVER_DOMAIN"
   fi
 }
 
@@ -86,9 +75,7 @@ prompt_port() {
   local input
   read -rp "请输入 Shadowsocks 2022 入站端口（1-65535，默认 40000）： " input || true
   input="${input:-40000}"
-  if ! [[ "$input" =~ ^[0-9]+$ ]] || (( input < 1 || input > 65535 )); then
-    die "端口无效：$input"
-  fi
+  [[ "$input" =~ ^[0-9]+$ ]] && (( input>=1 && input<=65535 )) || die "端口无效：$input"
   SS_PORT="$input"
 }
 
@@ -99,22 +86,14 @@ install_xray() {
   tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
   [[ -n "${tag:-}" ]] && info "最新版本：$tag" || warn "无法从 GitHub API 获取最新版本，使用 latest 直链"
 
-  local tmpdir=""
-  trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT
-  tmpdir="$(mktemp -d)"
-
+  local tmpdir=""; trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT; tmpdir="$(mktemp -d)"
   local zipname="Xray-linux-64.zip"
   local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
   local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
 
   info "下载 Xray..."
-  if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then
-    :
-  elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then
-    :
-  else
-    die "下载 Xray 失败"
-  fi
+  if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :; \
+  elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :; else die "下载 Xray 失败"; fi
 
   info "解压并安装到 /usr/local/bin ..."
   unzip -q -o "$tmpdir/xray.zip" -d "$tmpdir"
@@ -131,32 +110,71 @@ generate_key() {
   [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
 }
 
-write_config() {
-  local cfg=/usr/local/etc/xray/config.json
-  cat > "$cfg" <<EOF
+backup_config_if_exists() {
+  local cfg="/usr/local/etc/xray/config.json"
+  if [[ -s "$cfg" ]]; then
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    local backup="/root/xray-config-backup-${ts}.json"
+    cp -a "$cfg" "$backup"
+    info "已备份现有配置到：$backup"
+  fi
+}
+
+append_or_create_config() {
+  local cfg="/usr/local/etc/xray/config.json"
+
+  # 生成将要追加的新 inbound（默认不启用 sniffing）
+  local new_inbound
+  new_inbound="$(cat <<EOF
+{
+  "port": $SS_PORT,
+  "protocol": "shadowsocks",
+  "settings": {
+    "method": "$SS_METHOD",
+    "password": "$SS_KEY_B64",
+    "network": "tcp,udp"
+  },
+  "tag": "ss-2022-in"
+}
+EOF
+)"
+
+  if [[ -s "$cfg" ]]; then
+    info "检测到已有 Xray 配置，尝试追加一个 ss-2022 inbound ..."
+    # 校验 JSON 合法性
+    if ! jq empty "$cfg" >/dev/null 2>&1; then
+      die "现有配置不是有效 JSON，请手动检查：$cfg"
+    fi
+    # 追加逻辑：若 .inbounds 不存在或不是数组，则创建为数组；否则直接追加
+    local tmp; tmp="$(mktemp)"
+    jq --argjson inbound "$new_inbound" '
+      if .inbounds == null then
+        .inbounds = [$inbound]
+      elif (.inbounds|type) != "array" then
+        .inbounds = [ .inbounds, $inbound ]
+      else
+        .inbounds += [ $inbound ]
+      end
+    ' "$cfg" > "$tmp"
+    mv "$tmp" "$cfg"
+    info "已在原有配置中追加 inbound。"
+  else
+    info "未检测到现有配置，生成新的配置文件 ..."
+    cat > "$cfg" <<EOF
 {
   "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "port": $SS_PORT,
-      "protocol": "shadowsocks",
-      "settings": {
-        "method": "$SS_METHOD",
-        "password": "$SS_KEY_B64",
-        "network": "tcp,udp"
-      },
-      "tag": "ss-2022-in"
-    }
-  ],
+  "inbounds": [ $new_inbound ],
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
     { "protocol": "blackhole", "tag": "blocked" }
   ]
 }
 EOF
+  fi
+
   chown xray:xray "$cfg"
   chmod 0644 "$cfg"
-  info "已写入配置：$cfg"
+  info "配置已更新：$cfg"
 }
 
 install_service_systemd() {
@@ -220,11 +238,9 @@ setup_service() {
   fi
 }
 
-# 探测公网 IP，并决定最终用于分享链接的地址
 detect_address() {
   if [[ -n "${SERVER_DOMAIN:-}" ]]; then
-    SERVER_ADDR="$SERVER_DOMAIN"
-    return
+    SERVER_ADDR="$SERVER_DOMAIN"; return
   fi
   local ipv4=""
   ipv4="$(curl -fsSL https://api.ipify.org || true)"
@@ -237,7 +253,6 @@ detect_address() {
 }
 
 print_ss_uri() {
-  # 用 python3 做 URL 编码，兼容 Alpine
   local enc_pw tag_enc
   enc_pw="$(python3 - <<'PY'
 import urllib.parse, os
@@ -263,18 +278,30 @@ PY
   echo "==========================================================="
 }
 
+restart_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart xray || true
+    systemctl status xray --no-pager -l || true
+  else
+    rc-service xray restart || true
+    rc-service xray status || true
+  fi
+}
+
 main() {
   require_root
   detect_os
   ensure_packages
-  prompt_domain     # <- 新增：先询问域名
+  prompt_domain
   prompt_port
   install_xray
   generate_key
-  write_config
+  backup_config_if_exists
+  append_or_create_config
   setup_service
-  detect_address    # <- 决定用域名或公网 IP
+  detect_address
   PW="$SS_KEY_B64" print_ss_uri
+  restart_service
 
   info "完成。常用命令："
   if command -v systemctl >/dev/null 2>&1; then
