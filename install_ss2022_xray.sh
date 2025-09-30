@@ -56,6 +56,34 @@ create_xray_user() {
   esac
 }
 
+# ========== 新增：域名输入与校验 ==========
+is_valid_domain() {
+  # 简洁严格校验：总长 <= 253；每个 label 1-63，字母数字中横线，首尾非横线；至少一处点；结尾 TLD >=2
+  # 允许 punycode (xn--)；不支持直接输入非 ASCII 的 IDN（需先转 punycode）
+  local d="$1"
+  [[ "$d" =~ ^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]
+}
+
+prompt_domain() {
+  local input
+  read -rp "请输入要使用的域名（留空则使用公网 IP）： " input || true
+  # 去掉首尾空白
+  input="$(echo -n "$input" | awk '{$1=$1;print}')"
+  if [[ -z "$input" ]]; then
+    SERVER_DOMAIN=""
+    info "未输入域名，将在稍后使用公网 IP。"
+  else
+    # 全小写
+    input="${input,,}"
+    if is_valid_domain "$input"; then
+      SERVER_DOMAIN="$input"
+      info "将使用域名：$SERVER_DOMAIN"
+    else
+      die "域名格式无效：$input"
+    fi
+  fi
+}
+
 prompt_port() {
   local input
   read -rp "请输入 Shadowsocks 2022 入站端口（1-65535，默认 40000）： " input || true
@@ -119,7 +147,6 @@ write_config() {
         "password": "$SS_KEY_B64",
         "network": "tcp,udp"
       },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] },
       "tag": "ss-2022-in"
     }
   ],
@@ -166,7 +193,7 @@ description="Xray Service"
 command="/usr/local/bin/xray"
 command_args="-config /usr/local/etc/xray/config.json"
 command_user="xray:xray"
-# 关键：后台运行并写入 pidfile，避免 rc-service 占用前台
+# 后台运行并写入 pidfile，避免安装流程卡在前台
 command_background=true
 pidfile="/run/xray.pid"
 start_stop_daemon_args="--make-pidfile --background"
@@ -195,13 +222,18 @@ setup_service() {
   fi
 }
 
-detect_public_ip() {
+# 探测公网 IP，并决定最终用于分享链接的地址
+detect_address() {
+  if [[ -n "${SERVER_DOMAIN:-}" ]]; then
+    SERVER_ADDR="$SERVER_DOMAIN"
+    return
+  fi
   local ipv4=""
   ipv4="$(curl -fsSL https://api.ipify.org || true)"
   [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ifconfig.me || true)"
   [[ -n "$ipv4" ]] || ipv4="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
-  SERVER_IP="${ipv4:-<SERVER_IP>}"
-  if [[ "$SERVER_IP" = "<SERVER_IP>" ]]; then
+  SERVER_ADDR="${ipv4:-<SERVER_IP>}"
+  if [[ "$SERVER_ADDR" = "<SERVER_IP>" ]]; then
     warn "无法自动探测公网 IP，请手动替换分享链接中的 <SERVER_IP>"
   fi
 }
@@ -219,14 +251,14 @@ import urllib.parse
 print(urllib.parse.quote("xray-ss2022", safe=''))
 PY
 )"
-  local uri="ss://${SS_METHOD}:${enc_pw}@${SERVER_IP}:${SS_PORT}#${tag_enc}"
+  local uri="ss://${SS_METHOD}:${enc_pw}@${SERVER_ADDR}:${SS_PORT}#${tag_enc}"
 
   echo
   echo "================ Shadowsocks 2022 配置信息 ================"
   echo "Method : $SS_METHOD"
   echo "Port   : $SS_PORT"
   echo "Key(B64): $SS_KEY_B64"
-  echo "Server : $SERVER_IP"
+  echo "Server : $SERVER_ADDR"
   echo
   echo "SS 分享链接（SIP002）："
   echo "$uri"
@@ -237,12 +269,13 @@ main() {
   require_root
   detect_os
   ensure_packages
+  prompt_domain     # <- 新增：先询问域名
   prompt_port
   install_xray
   generate_key
   write_config
-  setup_service         # <- OpenRC 会后台化，不会再卡住
-  detect_public_ip
+  setup_service
+  detect_address    # <- 决定用域名或公网 IP
   PW="$SS_KEY_B64" print_ss_uri
 
   info "完成。常用命令："
