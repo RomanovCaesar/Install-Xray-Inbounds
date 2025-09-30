@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# install_ss2022_xray.sh
+# 一键安装 Xray + Shadowsocks-2022(2022-blake3-aes-256-gcm)，适配 Debian/Ubuntu/Alpine
 set -euo pipefail
 
 die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
@@ -164,7 +166,10 @@ description="Xray Service"
 command="/usr/local/bin/xray"
 command_args="-config /usr/local/etc/xray/config.json"
 command_user="xray:xray"
+# 关键：后台运行并写入 pidfile，避免 rc-service 占用前台
+command_background=true
 pidfile="/run/xray.pid"
+start_stop_daemon_args="--make-pidfile --background"
 
 depend() {
   need net
@@ -202,7 +207,7 @@ detect_public_ip() {
 }
 
 print_ss_uri() {
-  # 使用 python3 做 URL 编码，兼容 Alpine
+  # 用 python3 做 URL 编码，兼容 Alpine
   local enc_pw tag_enc
   enc_pw="$(python3 - <<'PY'
 import urllib.parse, os
@@ -236,17 +241,17 @@ main() {
   install_xray
   generate_key
   write_config
-  setup_service
+  setup_service         # <- OpenRC 会后台化，不会再卡住
   detect_public_ip
   PW="$SS_KEY_B64" print_ss_uri
 
-  info "完成。可用命令："
+  info "完成。常用命令："
   if command -v systemctl >/dev/null 2>&1; then
-    echo "  systemctl status xray   # 查看运行状态"
-    echo "  journalctl -u xray -e   # 查看日志"
+    echo "  systemctl status xray      # 查看状态"
+    echo "  journalctl -u xray -e      # 查看日志"
   else
-    echo "  rc-service xray status  # 查看运行状态（OpenRC）"
-    echo "  rc-service xray restart # 重启服务"
+    echo "  rc-service xray status     # 查看状态（OpenRC）"
+    echo "  rc-service xray restart    # 重启服务（OpenRC）"
   fi
 }
 
