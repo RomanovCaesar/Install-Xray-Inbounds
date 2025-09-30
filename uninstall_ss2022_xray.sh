@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# uninstall_ss2022_xray.sh
-# 更严格地卸载并清理 Xray（Debian/Ubuntu/Alpine）
-set -euo pipefail
+# uninstall_ss2022_xray_v3.sh
+# 更稳健的 Xray 卸载脚本：systemd/OpenRC 全面清理 + 放宽匹配规则
+set -uo pipefail  # 去掉 -e，避免提前退出
 
 PURGE=false
 [[ "${1:-}" == "--purge" ]] && PURGE=true
@@ -33,77 +33,60 @@ detect_os() {
 
 has_systemd() { command -v systemctl >/dev/null 2>&1; }
 
-# 收集所有可能存在的 xray systemd 单元（xray.service / xray@.service 实例）
 collect_xray_units() {
-  local units=()
-
-  # 1) 从 unit-files 列表搜
-  if has_systemd; then
-    while read -r u; do [[ -n "$u" ]] && units+=("$u"); done < <(
-      systemctl list-unit-files --type=service 2>/dev/null | awk '/^xray(@.*)?\.service/ {print $1}'
-    )
-    # 2) 从已加载单元（包含inactive/failed）搜
-    while read -r u; do [[ -n "$u" ]] && units+=("$u"); done < <(
-      systemctl list-units --type=service --all 2>/dev/null | awk '/xray(@.*)?\.service/ {print $1}'
-    )
+  # 输出所有匹配到的 unit 名称（逐行）
+  if ! has_systemd; then
+    return 0
   fi
 
-  # 3) 如果上述都没抓到，但单元文件存在，也将 xray.service 加进去
-  [[ -f /etc/systemd/system/xray.service || -f /lib/systemd/system/xray.service || -f /usr/lib/systemd/system/xray.service ]] && units+=("xray.service")
+  # 1) unit-files
+  systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null \
+    | awk '{print $1}' | grep -E '.*xray.*\.service$' || true
 
-  # 去重
-  if ((${#units[@]})); then
-    printf "%s\n" "${units[@]}" | awk '!seen[$0]++'
-  fi
+  # 2) list-units
+  systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null \
+    | awk '{print $1}' | grep -E '.*xray.*\.service$' || true
+
+  # 3) 兜底
+  for f in /etc/systemd/system/*xray*.service /lib/systemd/system/*xray*.service /usr/lib/systemd/system/*xray*.service; do
+    [[ -f "$f" ]] && basename "$f"
+  done
 }
 
 stop_disable_systemd_units() {
-  has_systemd || return 0
-  local units
-  units="$(collect_xray_units || true)"
-  if [[ -z "$units" ]]; then
+  has_systemd || { warn "未检测到已注册的 Xray 服务（systemd）。"; return 0; }
+
+  mapfile -t units < <(collect_xray_units | awk 'NF && !seen[$0]++')
+  if ((${#units[@]}==0)); then
     warn "未检测到已注册的 Xray 服务（systemd）。"
     return 0
   fi
 
   info "检测到以下 systemd 单元将被停止并禁用："
-  echo "$units" | sed 's/^/  - /'
+  for u in "${units[@]}"; do echo "  - $u"; done
 
-  # 逐个停止/禁用，并清理失败状态
-  while read -r u; do
-    [[ -z "$u" ]] && continue
-    systemctl stop "$u" 2>/dev/null || true
+  for u in "${units[@]}"; do
+    systemctl stop "$u" --no-block 2>/dev/null || true
     systemctl disable "$u" 2>/dev/null || true
     systemctl reset-failed "$u" 2>/dev/null || true
-  done <<< "$units"
+  done
 
-  # 清理常见 wants 软链，防止重启后又被拉起
-  for wants in \
-    /etc/systemd/system/multi-user.target.wants/xray.service \
-    /etc/systemd/system/*/xray.service
-  do
-    [[ -L "$wants" || -f "$wants" ]] && { info "移除残留链接/文件：$wants"; rm -f "$wants"; }
+  for wants in /etc/systemd/system/*/*xray*.service; do
+    [[ -L "$wants" || -f "$wants" ]] && { info "移除残留链接/文件：$wants"; rm -f "$wants" || true; }
   done
 }
 
 remove_systemd_files() {
   has_systemd || return 0
   local removed=false
-  for f in \
-    /etc/systemd/system/xray.service \
-    /lib/systemd/system/xray.service \
-    /usr/lib/systemd/system/xray.service
-  do
+  for f in /etc/systemd/system/*xray*.service /lib/systemd/system/*xray*.service /usr/lib/systemd/system/*xray*.service; do
     if [[ -f "$f" ]]; then
       info "删除 systemd 单元文件：$f"
-      rm -f "$f"
+      rm -f "$f" || true
       removed=true
     fi
   done
-  # 彻底移除后 reload
-  if $removed; then
-    systemctl daemon-reload || true
-  fi
+  $removed && systemctl daemon-reload || true
 }
 
 stop_disable_openrc() {
@@ -117,10 +100,7 @@ stop_disable_openrc() {
 }
 
 remove_openrc_files() {
-  if [[ -f /etc/init.d/xray ]]; then
-    info "删除 OpenRC 脚本 /etc/init.d/xray"
-    rm -f /etc/init.d/xray
-  fi
+  [[ -f /etc/init.d/xray ]] && { info "删除 OpenRC 脚本 /etc/init.d/xray"; rm -f /etc/init.d/xray || true; }
   [[ -f /run/xray.pid ]] && rm -f /run/xray.pid || true
 }
 
@@ -131,9 +111,9 @@ backup_and_remove_config() {
     ts="$(date +%Y%m%d-%H%M%S)"
     backup="/root/xray-config-backup-${ts}.tar.gz"
     info "备份配置目录到 $backup"
-    tar -czf "$backup" -C "$(dirname "$cfg_dir")" "$(basename "$cfg_dir")"
+    tar -czf "$backup" -C "$(dirname "$cfg_dir")" "$(basename "$cfg_dir")" || true
     info "删除配置目录 $cfg_dir"
-    rm -rf "$cfg_dir"
+    rm -rf "$cfg_dir" || true
     echo -e "\e[34m[NOTE]\e[0m 备份已保存：$backup"
   else
     warn "未找到配置目录：$cfg_dir"
@@ -142,21 +122,16 @@ backup_and_remove_config() {
 
 remove_binary_and_misc() {
   local bin="/usr/local/bin/xray"
-  if [[ -f "$bin" ]]; then
-    info "删除二进制文件 $bin"
-    rm -f "$bin"
-  else
-    warn "未找到二进制文件：$bin"
-  fi
+  [[ -f "$bin" ]] && { info "删除二进制文件 $bin"; rm -f "$bin" || true; } || warn "未找到二进制文件：$bin"
 
   for d in /usr/local/share/xray /usr/share/xray /var/lib/xray; do
-    [[ -d "$d" ]] && { info "删除数据目录 $d"; rm -rf "$d"; }
+    [[ -d "$d" ]] && { info "删除数据目录 $d"; rm -rf "$d" || true; }
   done
 
   for f in /var/log/xray.log /var/log/xray/xray.log; do
-    [[ -f "$f" ]] && { info "删除日志文件 $f"; rm -f "$f"; }
+    [[ -f "$f" ]] && { info "删除日志文件 $f"; rm -f "$f" || true; }
   done
-  [[ -d /var/log/xray ]] && { info "删除日志目录 /var/log/xray"; rm -rf /var/log/xray; }
+  [[ -d /var/log/xray ]] && { info "删除日志目录 /var/log/xray"; rm -rf /var/log/xray || true; }
 }
 
 remove_user_group_if_purge() {
@@ -176,14 +151,12 @@ remove_user_group_if_purge() {
   elif command -v groupdel >/dev/null 2>&1; then
     groupdel xray 2>/dev/null || true
   fi
-
-  [[ -d /home/xray ]] && rm -rf /home/xray || true
 }
 
 summary() {
   echo
   echo "====== 卸载完成 ======"
-  echo "已停止并移除服务、删除单元文件、二进制与配置（配置已备份到 /root/xray-config-backup-*.tar.gz）。"
+  echo "已停止并移除 systemd/OpenRC 服务、删除单元文件、二进制与配置。"
   if $PURGE; then
     echo "已尝试删除 xray 用户与组。"
   else
@@ -191,8 +164,8 @@ summary() {
   fi
   echo
   if has_systemd; then
-    echo "检查残留（可选）："
-    echo "  systemctl list-units --type=service | grep -i xray || true"
+    echo "检查残留："
+    echo "  systemctl list-units --type=service --all | grep -i xray || true"
     echo "  systemctl list-unit-files | grep -i xray || true"
   fi
 }
@@ -201,17 +174,14 @@ main() {
   require_root
   detect_os
 
-  # 优先处理 systemd（Debian 12 属于此分支）
   stop_disable_systemd_units
   remove_systemd_files
-
-  # 同时处理 OpenRC（以防用户自己装过 OpenRC 版本）
   stop_disable_openrc
   remove_openrc_files
-
   backup_and_remove_config
   remove_binary_and_misc
   remove_user_group_if_purge
+  has_systemd && systemctl daemon-reload || true
 
   summary
 }
