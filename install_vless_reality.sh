@@ -7,6 +7,7 @@
 # 更新日志 (V-Fork-Caesar-2.2):
 # - [改进] 默认Outbounds domainStrategy改为AsIs
 # - [改进] 默认Reality sni改为hk.art.museum
+# - [改进] 新增 Alpine 系统识别与兼容（apk 依赖安装、OpenRC 服务管理与日志查看）
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -25,19 +26,21 @@ readonly magenta='\e[95m' cyan='\e[96m' none='\e[0m'
 # --- 全局变量 ---
 xray_status_info=""
 is_quiet=false
+OS_ID=""
+INIT_SYSTEM=""
 
 # --- 辅助函数 ---
-error() { echo -e "\n$red[✖] $1$none\n" >&2; }
-info() { [[ "$is_quiet" = false ]] && echo -e "\n$yellow[!] $1$none\n"; }
-success() { [[ "$is_quiet" = false ]] && echo -e "\n$green[✔] $1$none\n"; }
+error() { echo -e "\n${red}[✖] $1${none}\n" >&2; }
+info()  { [[ "$is_quiet" = false ]] && echo -e "\n${yellow}[!] $1${none}\n"; }
+success(){ [[ "$is_quiet" = false ]] && echo -e "\n${green}[✔] $1${none}\n"; }
 
 spinner() {
-    local pid=$1; local spinstr='|/-\'
+    local pid=$1; local spinstr='|/-\\'
     if [[ "$is_quiet" = true ]]; then
         wait "$pid"
         return
     fi
-    while ps -p "$pid" > /dev/null; do
+    while ps -p "$pid" > /dev/null 2>&1; do
         local temp=${spinstr#?}
         printf " [%c]  " "$spinstr"
         local spinstr=$temp${spinstr%"$temp"}
@@ -83,26 +86,26 @@ is_valid_port() {
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
-# 新增：检查端口是否被占用
+# 新增：检查端口是否被占用（兼容多系统）
 is_port_in_use() {
     local port=$1
-    # 使用多种方法检查端口占用
     if command -v ss &>/dev/null; then
         ss -tuln 2>/dev/null | grep -q ":$port "
     elif command -v netstat &>/dev/null; then
         netstat -tuln 2>/dev/null | grep -q ":$port "
     elif command -v lsof &>/dev/null; then
         lsof -i ":$port" &>/dev/null
+    elif command -v nc &>/dev/null; then
+        nc -z 127.0.0.1 "$port" 2>/dev/null
     else
-        # 如果没有可用工具，尝试连接测试
-        timeout 1 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null
+        # /dev/tcp 方案（需要 bash 支持）
+        (echo > "/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
     fi
 }
 
 # 增强的UUID验证函数
 is_valid_uuid() {
     local uuid=$1
-    # 标准UUID格式验证：8-4-4-4-12 位十六进制数字
     [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
@@ -111,122 +114,157 @@ is_valid_domain() {
     [[ "$domain" =~ ^[a-zA-Z0-9-]{1,63}(\.[a-zA-Z0-9-]{1,63})+$ ]] && [[ "$domain" != *--* ]]
 }
 
-# --- 改进的系统兼容性检查 ---
+# --- 初始化系统识别 ---
+detect_system() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS_ID=${ID:-}
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service >/dev/null 2>&1; then
+        INIT_SYSTEM="openrc"
+    else
+        INIT_SYSTEM="unknown"
+    fi
+}
+
+# --- OpenRC 服务编排（仅 Alpine 等 OpenRC 环境） ---
+ensure_openrc_service() {
+    # 如果是 systemd 则不处理
+    [[ "$INIT_SYSTEM" != "openrc" ]] && return 0
+
+    # 若已存在 init 脚本直接返回
+    if [[ -x /etc/init.d/xray ]]; then
+        return 0
+    fi
+
+    info "检测到 OpenRC，正在创建 /etc/init.d/xray 服务脚本…"
+    install -d -m 0755 /var/log/xray || true
+
+    cat >/etc/init.d/xray <<'EOF'
+#!/sbin/openrc-run
+name="Xray"
+description="Xray (XTLS) service"
+
+command="/usr/local/bin/xray"
+command_args="-c /usr/local/etc/xray/config.json"
+command_background=true
+pidfile="/run/xray.pid"
+output_log="/var/log/xray/access.log"
+error_log="/var/log/xray/error.log"
+
+depend() {
+    need net
+    use dns logger
+}
+EOF
+
+    chmod +x /etc/init.d/xray
+    rc-update add xray default || true
+    success "OpenRC 服务已创建并加入开机自启。"
+}
+
+service_restart() {
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        systemctl restart xray
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        rc-service xray restart
+    else
+        error "无法确定服务管理器，请手动重启 Xray。"
+        return 1
+    fi
+}
+
+service_is_active() {
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        systemctl is-active --quiet xray
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        rc-service xray status >/dev/null 2>&1 && rc-service xray status 2>/dev/null | grep -qi started
+    else
+        return 1
+    fi
+}
+
+# --- 改进的系统兼容性检查（加入 Alpine） ---
 check_system_compatibility() {
-    local os_release_file="/etc/os-release"
-    local debian_version_file="/etc/debian_version"
-    local lsb_release_file="/etc/lsb-release"
-    
-    # 检查是否为Linux系统
     if [[ "$(uname -s)" != "Linux" ]]; then
         error "错误: 此脚本仅支持 Linux 系统。"
         return 1
     fi
-    
-    # 支持的发行版列表
-    local supported_distros=("ubuntu" "debian" "kali" "raspbian" "deepin" "mint" "elementary")
+
+    detect_system
+
+    # 支持发行版
+    local supported_distros=("ubuntu" "debian" "kali" "raspbian" "deepin" "mint" "elementary" "alpine")
     local distro_detected=false
-    local distro_name=""
-    local distro_version=""
-    
-    # 方法1: 检查 /etc/os-release (最标准的方法)
-    if [[ -f "$os_release_file" ]]; then
-        source "$os_release_file"
-        distro_name=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-        distro_version="$VERSION_ID"
-        
-        # 检查是否为支持的发行版
-        for supported in "${supported_distros[@]}"; do
-            if [[ "$distro_name" == "$supported" ]]; then
-                distro_detected=true
-                break
-            fi
-        done
-        
-        # 检查基于Debian的发行版
-        if [[ "$distro_detected" == false && "$ID_LIKE" =~ debian|ubuntu ]]; then
+
+    for s in "${supported_distros[@]}"; do
+        if [[ "${OS_ID}" == "$s" ]]; then
             distro_detected=true
-            distro_name="$ID_LIKE"
+            break
         fi
-    fi
-    
-    # 方法2: 检查 /etc/debian_version (Debian系特有)
-    if [[ "$distro_detected" == false && -f "$debian_version_file" ]]; then
-        distro_detected=true
-        distro_name="debian-based"
-        distro_version=$(cat "$debian_version_file" 2>/dev/null || echo "unknown")
-    fi
-    
-    # 方法3: 检查 /etc/lsb-release (备用方法)
-    if [[ "$distro_detected" == false && -f "$lsb_release_file" ]]; then
-        source "$lsb_release_file"
-        local lsb_id=$(echo "$DISTRIB_ID" | tr '[:upper:]' '[:lower:]')
-        for supported in "${supported_distros[@]}"; do
-            if [[ "$lsb_id" == "$supported" ]]; then
-                distro_detected=true
-                distro_name="$lsb_id"
-                distro_version="$DISTRIB_RELEASE"
-                break
-            fi
-        done
-    fi
-    
-    # 方法4: 检查包管理器 (最后的检查)
+    done
+
+    # APT 兼容作为兜底
     if [[ "$distro_detected" == false ]]; then
         if command -v apt &>/dev/null && command -v dpkg &>/dev/null; then
             distro_detected=true
-            distro_name="debian-compatible"
-            info "检测到基于APT的包管理系统，假定为Debian兼容系统。"
+            OS_ID="debian-compatible"
+            info "检测到基于 APT 的包管理系统，假定为 Debian 兼容系统。"
         fi
     fi
-    
+
     if [[ "$distro_detected" == false ]]; then
-        error "错误: 未检测到支持的Linux发行版。"
-        error "支持的系统: Ubuntu, Debian, Kali Linux, Raspbian, Deepin, Linux Mint, elementary OS"
+        error "错误: 未检测到支持的 Linux 发行版。"
+        error "支持的系统: Ubuntu, Debian, Kali, Raspbian, Deepin, Linux Mint, elementary OS, Alpine"
         error "当前系统信息: $(uname -a)"
         return 1
     fi
-    
-    # 输出检测结果
+
     if [[ "$is_quiet" == false ]]; then
         info "系统兼容性检查通过"
-        info "检测到系统: ${distro_name} ${distro_version}"
+        info "检测到系统: ${OS_ID} | init: ${INIT_SYSTEM}"
     fi
-    
-    # 检查关键命令是否存在
-    local required_commands=("systemctl" "awk" "grep" "sed")
+
+    # 关键命令：不再强制 systemctl；按需检查基础工具
+    local required_commands=("awk" "grep" "sed")
     local missing_commands=()
-    
     for cmd in "${required_commands[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing_commands+=("$cmd")
-        fi
+        command -v "$cmd" >/dev/null 2>&1 || missing_commands+=("$cmd")
     done
-    
     if [[ ${#missing_commands[@]} -gt 0 ]]; then
         error "错误: 缺少必要的系统命令: ${missing_commands[*]}"
-        error "请确保系统完整安装后再运行此脚本。"
         return 1
     fi
-    
     return 0
 }
 
 # --- 预检查与环境设置 ---
 pre_check() {
     [[ $(id -u) != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
-    
-    # 使用改进的系统兼容性检查
+
     if ! check_system_compatibility; then
         exit 1
     fi
 
+    # 依赖安装：根据不同包管理器处理
     if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
-        info "检测到缺失的依赖 (jq/curl)，正在尝试自动安装..."
-        (DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl) &> /dev/null &
-        spinner $!
+        info "检测到缺失的依赖 (jq/curl)，正在尝试自动安装…"
+        if [[ "$OS_ID" == "alpine" ]]; then
+            (apk update && apk add --no-cache jq curl bash iproute2 coreutils netcat-openbsd) &> /dev/null &
+            spinner $!
+            # Alpine 默认 /bin/sh 为 ash，但本脚本用 bash，确保安装了 bash
+        else
+            (DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl) &> /dev/null &
+            spinner $!
+        fi
         if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
-            error "依赖 (jq/curl) 自动安装失败。请手动运行 'apt update && apt install -y jq curl' 后重试。"
+            if [[ "$OS_ID" == "alpine" ]]; then
+                error "依赖 (jq/curl) 自动安装失败。请手动运行 'apk add --no-cache jq curl' 后重试。"
+            else
+                error "依赖 (jq/curl) 自动安装失败。请手动运行 'apt update && apt install -y jq curl' 后重试。"
+            fi
             exit 1
         fi
         success "依赖已成功安装。"
@@ -237,7 +275,7 @@ check_xray_status() {
     if [[ ! -f "$xray_binary_path" ]]; then xray_status_info="  Xray 状态: ${red}未安装${none}"; return; fi
     local xray_version=$($xray_binary_path version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
     local service_status
-    if systemctl is-active --quiet xray 2>/dev/null; then service_status="${green}运行中${none}"; else service_status="${yellow}未运行${none}"; fi
+    if service_is_active; then service_status="${green}运行中${none}"; else service_status="${yellow}未运行${none}"; fi
     xray_status_info="  Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
 }
 
@@ -295,7 +333,6 @@ update_xray() {
     if [[ -z "$latest_version" ]]; then error "获取最新版本号失败，请检查网络或稍后再试。" && return; fi
     info "当前版本: ${cyan}${current_version}${none}，最新版本: ${cyan}${latest_version}${none}"
     if [[ "$current_version" == "$latest_version" ]]; then success "您的 Xray 已是最新版本，无需更新。" && return; fi
-    
     info "发现新版本，开始更新..."
     if ! execute_official_script "install"; then error "Xray 核心更新失败！" && return; fi
     info "正在更新 GeoIP 和 GeoSite 数据文件..."
@@ -308,12 +345,12 @@ update_xray() {
 restart_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装，无法重启。" && return 1; fi
     info "正在重启 Xray 服务..."
-    if ! systemctl restart xray; then
+    if ! service_restart; then
         error "错误: Xray 服务重启失败, 请使用菜单 5 查看日志检查具体原因。"
         return 1
     fi
     sleep 1
-    if ! systemctl is-active --quiet xray; then
+    if ! service_is_active; then
         error "错误: Xray 服务启动失败, 请使用菜单 5 查看日志检查具体原因。"
         return 1
     fi
@@ -329,7 +366,12 @@ uninstall_xray() {
     fi
     info "正在卸载 Xray..."
     if execute_official_script "remove --purge"; then
-        rm -f ~/xray_vless_reality_link.txt
+        rm -f ~/xray_vless_reality_link.txt || true
+        # OpenRC 清理
+        if [[ "$INIT_SYSTEM" == "openrc" ]]; then
+            rc-update del xray default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/xray || true
+        fi
         success "Xray 已成功卸载。"
     else
         error "Xray 卸载失败！"
@@ -340,7 +382,16 @@ uninstall_xray() {
 view_xray_log() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装，无法查看日志。" && return; fi
     info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"
-    journalctl -u xray -f --no-pager
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u xray -f --no-pager
+    elif command -v logread >/dev/null 2>&1; then
+        # BusyBox syslog
+        logread -f | grep -i xray
+    elif [[ -d /var/log/xray ]]; then
+        tail -n 200 -F /var/log/xray/*.log 2>/dev/null || tail -n 200 -F /var/log/*.log | grep -i xray
+    else
+        error "无法找到日志来源，请检查系统日志或 /var/log/xray。"
+    fi
 }
 
 modify_config() {
@@ -362,7 +413,6 @@ modify_config() {
             error "端口无效，请输入一个1-65535之间的数字。"
             continue
         fi
-        # 如果端口没有变化，跳过占用检查
         if [[ "$port" != "$current_port" ]] && is_port_in_use "$port"; then
             error "端口 $port 已被占用，请选择其他端口。"
             continue
@@ -416,18 +466,18 @@ view_subscription_info() {
     else
         echo "${vless_url}" > ~/xray_vless_reality_link.txt
         echo "----------------------------------------------------------------"
-        echo -e "$green --- Xray VLESS-Reality 订阅信息 --- $none"
-        echo -e "$yellow 名称: $cyan$link_name$none"
-        echo -e "$yellow 地址: $cyan$ip$none"
-        echo -e "$yellow 端口: $cyan$port$none"
-        echo -e "$yellow UUID: $cyan$uuid$none"
-        echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"
-        echo -e "$yellow 指纹: $cyan"chrome"$none"
-        echo -e "$yellow SNI: $cyan$domain$none"
-        echo -e "$yellow 公钥: $cyan$public_key$none"
-        echo -e "$yellow ShortId: $cyan$shortid$none"
+        echo -e "${green} --- Xray VLESS-Reality 订阅信息 --- ${none}"
+        echo -e "${yellow} 名称: ${cyan}$link_name${none}"
+        echo -e "${yellow} 地址: ${cyan}$ip${none}"
+        echo -e "${yellow} 端口: ${cyan}$port${none}"
+        echo -e "${yellow} UUID: ${cyan}$uuid${none}"
+        echo -e "${yellow} 流控: ${cyan}"xtls-rprx-vision"${none}"
+        echo -e "${yellow} 指纹: ${cyan}"chrome"${none}"
+        echo -e "${yellow} SNI: ${cyan}$domain${none}"
+        echo -e "${yellow} 公钥: ${cyan}$public_key${none}"
+        echo -e "${yellow} ShortId: ${cyan}$shortid${none}"
         echo "----------------------------------------------------------------"
-        echo -e "$green 订阅链接 (已保存到 ~/xray_vless_reality_link.txt): $none\n"; echo -e "$cyan${vless_url}${none}"
+        echo -e "${green} 订阅链接 (已保存到 ~/xray_vless_reality_link.txt): ${none}\n"; echo -e "${cyan}${vless_url}${none}"
         echo "----------------------------------------------------------------"
     fi
 }
@@ -435,6 +485,7 @@ view_subscription_info() {
 # --- 核心逻辑函数 ---
 write_config() {
     local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701"
+    mkdir -p "$(dirname "$xray_config_path")"
     jq -n \
         --argjson port "$port" \
         --arg uuid "$uuid" \
@@ -505,6 +556,9 @@ run_install() {
     info "正在写入 Xray 配置文件..."
     write_config "$port" "$uuid" "$domain" "$private_key" "$public_key"
 
+    # OpenRC 环境下确保服务单位存在
+    ensure_openrc_service
+
     if ! restart_xray; then exit 1; fi
 
     success "Xray 安装/配置成功！"
@@ -519,7 +573,7 @@ press_any_key_to_continue() {
 main_menu() {
     while true; do
         clear
-        echo -e "$cyan Xray VLESS-Reality 一键安装管理脚本$none"
+        echo -e "${cyan} Xray VLESS-Reality 一键安装管理脚本${none}"
         echo "---------------------------------------------"
         check_xray_status
         echo -e "${xray_status_info}"
