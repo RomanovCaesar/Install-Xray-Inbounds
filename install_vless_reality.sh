@@ -66,18 +66,72 @@ get_public_ip() {
 }
 
 execute_official_script() {
-    local args="$1"
-    local script_content
-    script_content=$(curl -L "$xray_install_script_url")
-    if [[ -z "$script_content" ]]; then
-        error "下载 Xray 官方安装脚本失败！请检查网络连接。"
-        return 1
+    local action="$1"
+    local install_dir="/usr/local/bin"
+    local version url tmpdir arch
+
+    # 判断是否有 systemctl（Debian/Ubuntu）
+    if command -v systemctl >/dev/null 2>&1; then
+        info "检测到 systemd 系统，使用官方 Xray 安装脚本..."
+        if [[ "$is_quiet" = true ]]; then
+            curl -fsSL "$xray_install_script_url" | bash -s -- "$action" >/dev/null 2>&1
+        else
+            curl -fsSL "$xray_install_script_url" | bash -s -- "$action"
+        fi
+        return
     fi
-    bash -c "$script_content" @ $args &> /dev/null &
-    spinner $!
-    if ! wait $!; then
-        return 1
-    fi
+
+    # 否则走手动安装（Alpine/OpenRC）
+    info "检测到非 systemd 系统（如 Alpine / OpenRC），使用手动安装逻辑..."
+
+    case "$action" in
+        install)
+            # 获取最新版本号
+            version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
+            [[ -z "$version" ]] && { error "获取 Xray 版本号失败"; return 1; }
+
+            info "正在下载 Xray-core $version ..."
+            tmpdir=$(mktemp -d)
+            arch=$(uname -m)
+            case "$arch" in
+                x86_64)  arch="64" ;;
+                aarch64) arch="arm64-v8a" ;;
+                armv7l)  arch="arm32-v7a" ;;
+                *) error "不支持的架构: $arch"; rm -rf "$tmpdir"; return 1 ;;
+            esac
+
+            url="https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip"
+            curl -L -o "$tmpdir/xray.zip" "$url" || { error "下载失败"; rm -rf "$tmpdir"; return 1; }
+
+            unzip -qo "$tmpdir/xray.zip" -d "$tmpdir" || { error "解压失败"; rm -rf "$tmpdir"; return 1; }
+            install -m 755 "$tmpdir/xray" "$install_dir/xray"
+
+            mkdir -p /usr/local/etc/xray /usr/local/share/xray
+            rm -rf "$tmpdir"
+
+            success "Xray 核心已安装到 $install_dir/xray"
+            ;;
+
+        install-geodata)
+            info "下载最新 GeoIP / GeoSite 数据文件..."
+            mkdir -p /usr/local/share/xray
+            curl -fsSL -o /usr/local/share/xray/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+            curl -fsSL -o /usr/local/share/xray/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+            success "Geo 数据文件已更新"
+            ;;
+
+        remove|--purge)
+            info "卸载 Xray..."
+            rm -f /usr/local/bin/xray /usr/local/etc/xray/config.json
+            rm -rf /usr/local/share/xray
+            success "Xray 已卸载完成"
+            ;;
+
+        *)
+            error "未知操作: $action"
+            return 1
+            ;;
+    esac
 }
 
 # --- 改进的验证函数 ---
