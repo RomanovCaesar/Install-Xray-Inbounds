@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install_ss2022_xray.sh
-# 安装/追加 Xray 的 Shadowsocks-2022 入站（2022-blake3-aes-256-gcm）
+# 安装/追加 Xray 的 Shadowsocks 入站（aes-128/256-gcm 或 chacha20-ietf-poly1305 或 2022-blake3-aes-128/256-gcm 或 2022-blake3-chacha20-poly1305）
 # 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；支持自定义密码
 # 检测旧配置则追加 inbound；检测端口冲突（配置内&系统监听）；自动生成唯一 tag
 set -euo pipefail
@@ -184,8 +184,10 @@ generate_key() {
     echo "================ Shadowsocks 加密方式选择 ================"
     echo "  1) aes-128-gcm  （16 字节密钥）"
     echo "  2) aes-256-gcm  （32 字节密钥）"
+    echo "  3) chacha20-ietf-poly1305  （32 字节密钥）"
     echo "=========================================================="
-    read -rp "请输入加密方式编号（1/2）： " msel || true
+    read -rp "请输入加密方式编号（1/2/3，默认选2）： " msel || true
+    msel="${msel:-2}"
 
     case "$msel" in
       1)
@@ -196,8 +198,12 @@ generate_key() {
         SS_METHOD="aes-256-gcm"
         KEY_BYTES=32
         ;;
+      3)
+        SS_METHOD="chacha20-ietf-poly1305"
+        KEY_BYTES=32
+        ;;
       *)
-        die "无效选择，请输入 1 或 2"
+        die "无效选择，请输入 1，2 或 3"
         ;;
     esac
 
@@ -207,8 +213,9 @@ generate_key() {
     echo "================ Shadowsocks 2022 加密方式选择 ================"
     echo "  1) 2022-blake3-aes-128-gcm  （16 字节密钥）"
     echo "  2) 2022-blake3-aes-256-gcm  （32 字节密钥）"
+    echo "  3) 2022-blake3-chacha20-poly1305  （32 字节密钥）"
     echo "=============================================================="
-    read -rp "请输入加密方式编号（1/2，默认 2）： " msel || true
+    read -rp "请输入加密方式编号（1/2/3，默认选2）： " msel || true
     msel="${msel:-2}"
 
     case "$msel" in
@@ -220,8 +227,12 @@ generate_key() {
         SS_METHOD="2022-blake3-aes-256-gcm"
         KEY_BYTES=32
         ;;
+      3)
+        SS_METHOD="2022-blake3-chacha20-poly1305"
+        KEY_BYTES=32
+        ;;
       *)
-        die "无效选择，请输入 1 或 2"
+        die "无效选择，请输入 1，2 或 3"
         ;;
     esac
   fi
