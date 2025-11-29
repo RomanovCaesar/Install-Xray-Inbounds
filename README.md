@@ -1,6 +1,6 @@
 Usage: 
 
-ss 2022:
+ss and ss2022:
 ```bash
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_ss2022.sh -o install_ss2022.sh && chmod +x install_ss2022.sh && sudo ./install_ss2022.sh
 ```
