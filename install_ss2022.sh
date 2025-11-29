@@ -154,18 +154,44 @@ install_xray() {
 }
 
 generate_key() {
-  SS_METHOD="2022-blake3-aes-256-gcm"
+
+  echo
+  echo "================ Shadowsocks 2022 加密方式选择 ================"
+  echo "  1) 2022-blake3-aes-128-gcm"
+  echo "  2) 2022-blake3-aes-256-gcm  (默认)"
+  echo "=============================================================="
+  read -rp "请输入加密方式编号（1/2，默认 2）： " msel || true
+  msel="${msel:-2}"
+
+  case "$msel" in
+    1)
+      SS_METHOD="2022-blake3-aes-128-gcm"
+      KEY_BYTES=16
+      info "已选择加密方式：2022-blake3-aes-128-gcm（16 字节密钥）"
+      ;;
+    2)
+      SS_METHOD="2022-blake3-aes-256-gcm"
+      KEY_BYTES=32
+      info "已选择加密方式：2022-blake3-aes-256-gcm（32 字节密钥）"
+      ;;
+    *)
+      die "无效选择，请输入 1 或 2"
+      ;;
+  esac
+
   echo
   echo "================ Shadowsocks 2022 密码设置 ================"
   read -rp "请输入 Shadowsocks 2022 密码（留空则自动生成随机密码）： " input || true
-  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # 去掉多余空格
+  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # trim
+
   if [[ -n "$input" ]]; then
     SS_KEY_B64="$input"
     info "使用用户自定义密码。"
   else
-    SS_KEY_B64="$(openssl rand -base64 32 | tr -d '\n')"
+    # 根据选择生成对应字节长度的密钥
+    SS_KEY_B64="$(openssl rand -base64 $KEY_BYTES | tr -d '\n')"
     [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
-    info "未输入密码，已自动生成随机密码。"
+    info "未输入密码，已自动生成随机密码（${KEY_BYTES} 字节）。"
   fi
 }
 
