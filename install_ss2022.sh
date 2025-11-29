@@ -51,24 +51,17 @@ create_xray_user() {
   esac
 }
 
-# ===== 域名输入与校验（可留空）=====
-is_valid_domain() {
-  local d="$1"
-  [[ "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]
-}
-
 prompt_domain() {
   local input
-  read -rp "请输入要使用的域名（留空则使用公网 IP）： " input || true
+  read -rp "请输入要使用的 IP 或者域名（留空则使用公网 IP）： " input || true
   input="$(echo -n "$input" | awk '{$1=$1;print}')"  # trim
   if [[ -z "$input" ]]; then
     SERVER_DOMAIN=""
-    info "未输入域名，将在稍后使用公网 IP。"
+    info "未输入 IP 或域名，将在稍后使用公网 IP。"
   else
     input="${input,,}"
-    is_valid_domain "$input" || die "域名格式无效：$input"
     SERVER_DOMAIN="$input"
-    info "将使用域名：$SERVER_DOMAIN"
+    info "将使用 IP 或域名：$SERVER_DOMAIN"
   fi
 }
 
@@ -403,7 +396,8 @@ detect_address() {
     SERVER_ADDR="$SERVER_DOMAIN"; return
   fi
   local ipv4=""
-  ipv4="$(curl -fsSL https://api.ipify.org || true)"
+  ipv4="$(curl -fsSL http://api.ipify.org || true)"
+  [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ip.sb || true)"
   [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ifconfig.me || true)"
   [[ -n "$ipv4" ]] || ipv4="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
   SERVER_ADDR="${ipv4:-<SERVER_IP>}"
