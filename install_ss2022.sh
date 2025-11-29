@@ -153,45 +153,91 @@ install_xray() {
   chown -R xray:xray /usr/local/etc/xray
 }
 
-generate_key() {
-
+select_protocol() {
   echo
-  echo "================ Shadowsocks 2022 加密方式选择 ================"
-  echo "  1) 2022-blake3-aes-128-gcm"
-  echo "  2) 2022-blake3-aes-256-gcm  (默认)"
-  echo "=============================================================="
-  read -rp "请输入加密方式编号（1/2，默认 2）： " msel || true
-  msel="${msel:-2}"
+  echo "================ 请选择协议类型 ================"
+  echo "  1) Shadowsocks (ss)"
+  echo "  2) Shadowsocks 2022 (ss2022)"
+  echo "================================================"
+  read -rp "请输入编号（1/2）： " PROTO_SELECT || true
 
-  case "$msel" in
+  case "$PROTO_SELECT" in
     1)
-      SS_METHOD="2022-blake3-aes-128-gcm"
-      KEY_BYTES=16
-      info "已选择加密方式：2022-blake3-aes-128-gcm（16 字节密钥）"
+      PROTOCOL="ss"
+      info "已选择：Shadowsocks (ss)"
       ;;
     2)
-      SS_METHOD="2022-blake3-aes-256-gcm"
-      KEY_BYTES=32
-      info "已选择加密方式：2022-blake3-aes-256-gcm（32 字节密钥）"
+      PROTOCOL="ss2022"
+      info "已选择：Shadowsocks 2022 (ss2022)"
       ;;
     *)
-      die "无效选择，请输入 1 或 2"
+      die "输入无效：必须是 1 或 2"
       ;;
   esac
+}
+
+generate_key() {
+
+  if [[ "$PROTOCOL" = "ss" ]]; then
+
+    echo
+    echo "================ Shadowsocks 加密方式选择 ================"
+    echo "  1) aes-128-gcm  （16 字节密钥）"
+    echo "  2) aes-256-gcm  （32 字节密钥）"
+    echo "=========================================================="
+    read -rp "请输入加密方式编号（1/2）： " msel || true
+
+    case "$msel" in
+      1)
+        SS_METHOD="aes-128-gcm"
+        KEY_BYTES=16
+        ;;
+      2)
+        SS_METHOD="aes-256-gcm"
+        KEY_BYTES=32
+        ;;
+      *)
+        die "无效选择，请输入 1 或 2"
+        ;;
+    esac
+
+  else  # ss2022
+
+    echo
+    echo "================ Shadowsocks 2022 加密方式选择 ================"
+    echo "  1) 2022-blake3-aes-128-gcm  （16 字节密钥）"
+    echo "  2) 2022-blake3-aes-256-gcm  （32 字节密钥）"
+    echo "=============================================================="
+    read -rp "请输入加密方式编号（1/2，默认 2）： " msel || true
+    msel="${msel:-2}"
+
+    case "$msel" in
+      1)
+        SS_METHOD="2022-blake3-aes-128-gcm"
+        KEY_BYTES=16
+        ;;
+      2)
+        SS_METHOD="2022-blake3-aes-256-gcm"
+        KEY_BYTES=32
+        ;;
+      *)
+        die "无效选择，请输入 1 或 2"
+        ;;
+    esac
+  fi
 
   echo
-  echo "================ Shadowsocks 2022 密码设置 ================"
-  read -rp "请输入 Shadowsocks 2022 密码（留空则自动生成随机密码）： " input || true
-  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # trim
+  echo "================ 密码设置 ================"
+  read -rp "请输入密码（留空则自动生成随机密码，注意自己输入密码需要格式正确，本脚本不做检查）： " input || true
+  input="$(echo -n "$input" | awk '{$1=$1;print}')"
 
   if [[ -n "$input" ]]; then
     SS_KEY_B64="$input"
     info "使用用户自定义密码。"
   else
-    # 根据选择生成对应字节长度的密钥
     SS_KEY_B64="$(openssl rand -base64 $KEY_BYTES | tr -d '\n')"
-    [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
-    info "未输入密码，已自动生成随机密码（${KEY_BYTES} 字节）。"
+    [[ -n "$SS_KEY_B64" ]] || die "密码生成失败"
+    info "未输入密码，已自动生成随机密码（${KEY_BYTES} 字节）"
   fi
 }
 
@@ -409,6 +455,7 @@ main() {
   prompt_domain
   prompt_port_until_free
   install_xray
+  select_protocol
   generate_key
   backup_config_if_exists
   generate_unique_tag      # <- 这里生成不会冲突的 tag
