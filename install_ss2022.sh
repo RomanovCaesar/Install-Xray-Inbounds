@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install_ss2022_xray.sh
 # 安装/追加 Xray 的 Shadowsocks-2022 入站（2022-blake3-aes-256-gcm）
-# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；
+# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；支持自定义密码
 # 检测旧配置则追加 inbound；检测端口冲突（配置内&系统监听）；自动生成唯一 tag
 set -euo pipefail
 
@@ -155,8 +155,18 @@ install_xray() {
 
 generate_key() {
   SS_METHOD="2022-blake3-aes-256-gcm"
-  SS_KEY_B64="$(openssl rand -base64 32 | tr -d '\n')"
-  [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
+  echo
+  echo "================ Shadowsocks 2022 密码设置 ================"
+  read -rp "请输入 Shadowsocks 2022 密码（留空则自动生成随机密码）： " input || true
+  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # 去掉多余空格
+  if [[ -n "$input" ]]; then
+    SS_KEY_B64="$input"
+    info "使用用户自定义密码。"
+  else
+    SS_KEY_B64="$(openssl rand -base64 32 | tr -d '\n')"
+    [[ -n "$SS_KEY_B64" ]] || die "密钥生成失败（openssl rand）"
+    info "未输入密码，已自动生成随机密码。"
+  fi
 }
 
 backup_config_if_exists() {
@@ -344,6 +354,16 @@ PY
   echo "SS 分享链接（SIP002）："
   echo "$uri"
   echo "==========================================================="
+
+  # 新增部分：保存分享链接到文件
+  local link_file="/root/xray_ss2022_link.txt"
+  {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
+    echo "$uri"
+    echo
+  } >> "$link_file"
+
+  info "已将分享链接保存到：$link_file"
 }
 
 restart_service() {
