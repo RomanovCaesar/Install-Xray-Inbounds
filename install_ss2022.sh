@@ -122,6 +122,17 @@ prompt_port_until_free() {
 }
 
 install_xray() {
+  # --- 架构检测修复 ---
+  local arch
+  local machine
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) arch="64" ;;
+    aarch64|arm64) arch="arm64-v8a" ;;
+    *) die "不支持的 CPU 架构: $machine" ;;
+  esac
+  # ------------------
+
   local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
   info "获取 Xray 最新版本信息..."
   local tag
@@ -129,11 +140,14 @@ install_xray() {
   [[ -n "${tag:-}" ]] && info "最新版本：$tag" || warn "无法从 GitHub API 获取最新版本，使用 latest 直链"
 
   local tmpdir=""; trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT; tmpdir="$(mktemp -d)"
-  local zipname="Xray-linux-64.zip"
+  
+  # 使用动态架构名称
+  local zipname="Xray-linux-${arch}.zip"
+  
   local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
   local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
 
-  info "下载 Xray..."
+  info "下载 Xray ($zipname)..."
   if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :; \
   elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :; else die "下载 Xray 失败"; fi
 
