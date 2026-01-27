@@ -564,6 +564,11 @@ show_menu() {
     echo "================================================="
     echo "       Caesar 蜜汁 xray 服务端分流脚本 v2.0       "
     echo "================================================="
+    echo
+    echo "建议通过"
+    echo "curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/xray_manager.sh -o xray_manager.sh && chmod +x xray_manager.sh && sudo ./xray_manager.sh"
+    echo "使用工具，更加方便"
+    echo
     echo "  1. 安装 Geo 文件 (配置每日自动更新)"
     echo "  2. 添加 Outbounds (Socks / SS / VLESS)"
     echo "  3. 添加 Routing (配置分流规则)"
