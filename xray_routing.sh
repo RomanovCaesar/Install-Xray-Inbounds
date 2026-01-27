@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Caesar 蜜汁 xray 服务端分流脚本 v1.0
+# Caesar 蜜汁 xray 服务端分流脚本 v2.0
 # 适配环境：Debian/Ubuntu/Alpine
 # 依赖：jq, curl, python3, openssl
 # 功能：安装Geo数据、添加Outbounds(Socks/SS/VLESS)、添加Routing、查询配置
@@ -88,39 +88,51 @@ pause() {
     echo
 }
 
-# --- 功能 1: 安装 Geo 文件与定时任务 ---
+# --- 功能 1: 安装 Geo 文件与定时任务 (脚本版) ---
 install_geo_assets() {
-    info "开始下载 geoip.dat 和 geosite.dat 到 $GEO_DIR ..."
-    mkdir -p "$GEO_DIR"
+    local updater_script="/root/update_geo.sh"
+    # 这里填写你存放 update_geo.sh 的真实 Github 链接
+    local updater_url="https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/update_geo.sh"
+
+    info "正在拉取自动更新脚本 update_geo.sh ..."
     
-    curl -fsSL -o "$GEO_DIR/geoip.dat" https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat || die "下载 geoip.dat 失败"
-    curl -fsSL -o "$GEO_DIR/geosite.dat" https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat || die "下载 geosite.dat 失败"
-    
-    # 兼容性：如果 Xray 安装在 standard locations，可能在 share 目录找
-    if [[ -d "$GEO_SHARE_DIR" ]]; then
-        cp "$GEO_DIR/geoip.dat" "$GEO_SHARE_DIR/"
-        cp "$GEO_DIR/geosite.dat" "$GEO_SHARE_DIR/"
-        info "已同步 Geo 文件到 $GEO_SHARE_DIR (兼容默认配置)"
+    # 下载更新脚本
+    if curl -fsSL -o "$updater_script" "$updater_url"; then
+        chmod +x "$updater_script"
+        info "脚本下载成功: $updater_script"
+    else
+        die "无法从 Github 下载更新脚本，请检查网络或 URL。"
+    fi
+
+    info "正在执行第一次 Geo 文件下载与安装..."
+    # 立即执行一次，确保文件就位
+    if "$updater_script"; then
+        info "初始化下载成功！"
+    else
+        die "初始化下载失败，请检查上方错误信息。"
     fi
     
-    info "设置 Crontab 定时任务 (每天凌晨 3:00 更新)..."
-    local cron_cmd="curl -fsSL -o $GEO_DIR/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && curl -fsSL -o $GEO_DIR/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat && ( [ -d $GEO_SHARE_DIR ] && cp $GEO_DIR/*.dat $GEO_SHARE_DIR/ ) && xray -version >/dev/null 2>&1 && ( command -v systemctl >/dev/null && systemctl restart xray || rc-service xray restart )"
-    local cron_job="0 3 * * * $cron_cmd"
+    info "设置 Crontab 定时任务 (每天凌晨 3:00 执行 /root/update_geo.sh)..."
     
-    # 备份现有 crontab
+    # 定义简单的 Cron 任务 (追加日志记录，方便排错)
+    local cron_job="0 3 * * * $updater_script >> /var/log/update_geo.log 2>&1"
+    
+    # 写入 Crontab
     local tmp_cron
     tmp_cron=$(mktemp)
     crontab -l 2>/dev/null > "$tmp_cron" || true
     
-    # 移除旧任务避免重复
+    # 移除旧的 v2ray-rules-dat 任务 或 旧的 update_geo.sh 任务，防止重复
     sed -i '/v2ray-rules-dat/d' "$tmp_cron"
+    sed -i '/update_geo.sh/d' "$tmp_cron"
     
-    # 添加新任务
+    # 追加新任务
     echo "$cron_job" >> "$tmp_cron"
     crontab "$tmp_cron"
     rm -f "$tmp_cron"
     
-    info "Geo 文件安装及定时更新设置完成！"
+    info "Geo 文件自动更新已配置完成！"
+    info "日志将保存在: /var/log/update_geo.log"
     pause
 }
 
