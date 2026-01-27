@@ -14,6 +14,16 @@ vless vision reality (Fork from [yahuisme/xray-vless-reality](https://github.com
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_vless_reality.sh -o install_vless_reality.sh && chmod +x install_vless_reality.sh && sudo ./install_vless_reality.sh
 ```
 
+xray server routing:
+```bash
+curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/xray_routing.sh -o xray_routing.sh && chmod +x xray_routing.sh && sudo ./xray_routing.sh
+```
+
+Then enter this for xray server routing management:
+```bash
+xray-routing
+```
+
 If problem occured, try:
 ```bash
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/uninstall_xray.sh -o uninstall_xray.sh && chmod +x uninstall_xray.sh && sudo ./uninstall_xray.sh
