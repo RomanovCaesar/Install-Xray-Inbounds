@@ -562,7 +562,7 @@ update_script() {
 show_menu() {
     clear
     echo "================================================="
-    echo "       Caesar 蜜汁 xray 服务端分流脚本 v1.0       "
+    echo "       Caesar 蜜汁 xray 服务端分流脚本 v2.0       "
     echo "================================================="
     echo "  1. 安装 Geo 文件 (配置每日自动更新)"
     echo "  2. 添加 Outbounds (Socks / SS / VLESS)"
