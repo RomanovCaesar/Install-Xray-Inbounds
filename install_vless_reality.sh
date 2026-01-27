@@ -202,7 +202,7 @@ name="Xray"
 description="Xray (XTLS) service"
 
 command="/usr/local/bin/xray"
-command_args="-c /usr/local/etc/xray/config.json"
+command_args="run -config /usr/local/etc/xray/config.json"
 command_background=true
 pidfile="/run/xray.pid"
 output_log="/var/log/xray/access.log"
