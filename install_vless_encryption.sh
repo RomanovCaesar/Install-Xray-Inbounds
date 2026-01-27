@@ -326,6 +326,16 @@ PY
   echo "VLESS 分享链接："
   echo "$uri"
   echo "==================================================="
+
+  # 保存分享链接到文件 (与 ss 脚本逻辑一致) 
+  local link_file="/root/xray_vless_encryption_link.txt"
+  {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
+    echo "$uri"
+    echo
+  } >> "$link_file"
+
+  info "已将分享链接保存到：$link_file"
 }
 
 restart_service(){
