@@ -11,7 +11,6 @@ warn(){ echo -e "\e[33m[WARN]\e[0m $*"; }
 
 require_root(){ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then die "请以 root 身份运行（sudo）"; fi; }
 
-# ---------------- Detect OS & ensure packages ----------------
 detect_os(){
   if [[ -f /etc/os-release ]]; then . /etc/os-release; OS_ID="${ID,,}"; else die "无法检测 /etc/os-release"; fi
   case "$OS_ID" in
@@ -43,19 +42,19 @@ create_xray_user(){
   esac
 }
 
-# ---------------- Domain prompt ----------------
-is_valid_domain(){ local d="$1"; [[ "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; }
-
 prompt_domain(){
-  read -rp "请输入要使用的域名（留空则使用公网 IP）： " input || true
+  read -rp "请输入要使用的域名或IP（留空则使用公网 IP）： " input || true
   input="$(echo -n "$input" | awk '{$1=$1;print}')"
-  if [[ -z "$input" ]]; then SERVER_DOMAIN=""; info "未输入域名，将使用公网 IP"; else
-    input="${input,,}"; is_valid_domain "$input" || die "域名格式无效：$input"
-    SERVER_DOMAIN="$input"; info "将使用域名：$SERVER_DOMAIN"
+  if [[ -z "$input" ]]; then 
+    SERVER_DOMAIN=""
+    info "未输入域名或IP，将使用公网 IP"
+  else
+    input="${input,,}"
+    SERVER_DOMAIN="$input"
+    info "将使用域名：$SERVER_DOMAIN"
   fi
 }
 
-# ---------------- Port prompt and conflict checks ----------------
 read_port_once(){
   read -rp "请输入 VLESS 入站端口（1-65535，默认 40000）： " input || true
   input="${input:-40000}"
@@ -96,19 +95,31 @@ prompt_port_until_free(){
   done
 }
 
-# ---------------- Install Xray ----------------
 install_xray(){
+  # 架构检测
+  local arch
+  local machine
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) arch="64" ;;       # 常规 Intel/AMD 64位 CPU
+    aarch64|arm64) arch="arm64-v8a" ;; # ARM 64位 CPU
+    *) die "不支持的 CPU 架构: $machine" ;;
+  esac
+  
   local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
   info "获取 Xray 最新版本信息..."
   local tag; tag="$(curl -fsSL "$api" | grep -oE '\"tag_name\":\s*\"[^\"]+\"' | head -n1 | cut -d\" -f4)" || true
   [[ -n "${tag:-}" ]] && info "最新版本：$tag" || warn "无法获取最新 tag，使用 latest 直链"
 
   local tmpdir=""; trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT; tmpdir="$(mktemp -d)"
-  local zipname="Xray-linux-64.zip"
+  
+  # 使用动态生成的 zip 名称
+  local zipname="Xray-linux-${arch}.zip"
+  
   local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
   local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
 
-  info "下载 Xray..."
+  info "下载 Xray ($zipname)..."
   if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :;
   elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :;
   else die "下载 Xray 失败"; fi
@@ -122,7 +133,6 @@ install_xray(){
   chown -R xray:xray /usr/local/etc/xray || true
 }
 
-# ---------------- Use `xray vlessenc` to get tokens ----------------
 generate_vless_tokens_from_xray(){
   command -v xray >/dev/null 2>&1 || die "'xray' 未找到（需要运行 'xray vlessenc'）"
   info "调用 'xray vlessenc' 生成 ML-KEM-768 的 decryption/encryption ..."
@@ -241,7 +251,6 @@ EOF
   info "已写入配置：$cfg"
 }
 
-# ---------------- service install (systemd / openrc) ----------------
 install_service_systemd(){
   cat >/etc/systemd/system/xray.service <<'EOF'
 [Unit]
@@ -343,7 +352,6 @@ restart_service(){
   else rc-service xray restart || true; rc-service xray status || true; fi
 }
 
-# ---------------- Main ----------------
 main(){
   require_root
   detect_os
