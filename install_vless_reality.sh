@@ -629,6 +629,11 @@ main_menu() {
         clear
         echo -e "${cyan} Xray VLESS-Reality 一键安装管理脚本${none}"
         echo "---------------------------------------------"
+        echo
+        echo "建议通过"
+        echo "curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/xray_manager.sh -o xray_manager.sh && chmod +x xray_manager.sh && sudo ./xray_manager.sh"
+        echo "使用工具，更加方便"
+        echo
         check_xray_status
         echo -e "${xray_status_info}"
         echo "---------------------------------------------"
