@@ -1,5 +1,17 @@
 Usage: 
 
+xray management tool:
+```bash
+curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/xray_manager.sh -o xray_manager.sh && chmod +x xray_manager.sh && sudo ./xray_manager.sh
+```
+
+Then enter this for convenient usage:
+```bash
+xray-manager
+```
+
+If you only want to use specific functionalities：
+
 ss and ss2022:
 ```bash
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_ss2022.sh -o install_ss2022.sh && chmod +x install_ss2022.sh && sudo ./install_ss2022.sh
@@ -14,12 +26,12 @@ vless vision reality (Fork from [yahuisme/xray-vless-reality](https://github.com
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_vless_reality.sh -o install_vless_reality.sh && chmod +x install_vless_reality.sh && sudo ./install_vless_reality.sh
 ```
 
-xray server routing:
+xray routing:
 ```bash
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/xray_routing.sh -o xray_routing.sh && chmod +x xray_routing.sh && sudo ./xray_routing.sh
 ```
 
-Then enter this for xray server routing management:
+Then enter this for convenient xray routing management:
 ```bash
 xray-routing
 ```
