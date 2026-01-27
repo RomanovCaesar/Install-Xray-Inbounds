@@ -352,12 +352,12 @@ After=network-online.target nss-lookup.target
 Wants=network-online.target
 
 [Service]
-User=xray
-Group=xray
-ExecStart=/usr/local/bin/xray -config /usr/local/etc/xray/config.json
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
+User=root
+Group=root
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=false
 Restart=on-failure
 RestartSec=3
 
@@ -374,8 +374,7 @@ install_service_openrc() {
 name="xray"
 description="Xray Service"
 command="/usr/local/bin/xray"
-command_args="-config /usr/local/etc/xray/config.json"
-command_user="xray:xray"
+command_args="run -config /usr/local/etc/xray/config.json"
 # 后台运行并写入 pidfile，避免安装流程卡在前台
 command_background=true
 pidfile="/run/xray.pid"
@@ -384,10 +383,6 @@ start_stop_daemon_args="--make-pidfile --background"
 depend() {
   need net
   use dns
-}
-
-start_pre() {
-  checkpath --directory --owner ${command_user} /run
 }
 EOF
   chmod +x /etc/init.d/xray
