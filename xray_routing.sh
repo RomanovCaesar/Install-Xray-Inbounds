@@ -138,6 +138,7 @@ install_geo_assets() {
 
 # --- Python 解析脚本 (嵌入) ---
 # 用于解析 SS 和 VLESS 链接
+# 2025-01-28 修复: SS 密码 URL 解码 + VLESS spiderx 参数支持
 parse_link_py() {
     python3 -c '
 import sys, urllib.parse, json, base64, re
@@ -166,22 +167,31 @@ try:
             result["tag_comment"] = urllib.parse.unquote(tag)
         
         if "@" in body:
-            # format: user:pass@host:port (base64 encoded user:pass potentially)
+            # format: user:pass@host:port
             userpass_part, hostport = body.split("@", 1)
-            # 尝试解码 userpass
+            
+            method = ""
+            password = ""
+            decoded_success = False
+
+            # 1. 尝试 Base64 解码 (旧标准)
             try:
                 decoded_up = b64decode(userpass_part)
-                if ":" in decoded_up:
+                if ":" in decoded_up and decoded_up.isprintable():
                     method, password = decoded_up.split(":", 1)
-                else:
-                    method, password = userpass_part.split(":", 1) # legacy plain
+                    decoded_success = True
             except:
-                # 可能是明文 method:pass
+                pass
+
+            # 2. 如果 Base64 失败，则按 SIP002 明文处理
+            if not decoded_success:
                 if ":" in userpass_part:
                     method, password = userpass_part.split(":", 1)
+                    # 对密码进行 URL 解码
+                    password = urllib.parse.unquote(password)
                 else:
-                    raise Exception("Invalid SS format")
-            
+                    raise Exception("Invalid SS format: no colon found in user info")
+
             host, port = hostport.split(":")
             result["address"] = host
             result["port"] = int(port)
@@ -190,17 +200,20 @@ try:
         else:
             # format: base64(method:pass@host:port)
             decoded = b64decode(body)
-            # method:pass@host:port
             if "@" in decoded:
                 method_pass, host_port = decoded.split("@", 1)
-                method, password = method_pass.split(":", 1)
+                if ":" in method_pass:
+                    method, password = method_pass.split(":", 1)
+                else:
+                    raise Exception("Invalid SS Base64 format")
+                
                 host, port = host_port.split(":")
                 result["address"] = host
                 result["port"] = int(port)
                 result["method"] = method
                 result["password"] = password
             else:
-                 raise Exception("Invalid SS Base64")
+                 raise Exception("Invalid SS Base64 body")
 
     elif link.startswith("vless://"):
         result["protocol"] = "vless"
@@ -220,6 +233,8 @@ try:
         result["sid"] = params.get("sid", [""])[0]
         result["fp"] = params.get("fp", [""])[0]
         result["type"] = params.get("type", ["tcp"])[0]
+        # 【新增】提取 spiderx 参数
+        result["spiderx"] = params.get("spiderx", [""])[0]
         
     else:
         result["error"] = "Unsupported scheme"
@@ -231,7 +246,7 @@ except Exception as e:
 ' "$1"
 }
 
-# --- 功能 2: 添加 Outbounds ---
+# --- 功能 2: 添加 Outbounds (支持 spiderx) ---
 add_outbound() {
     if [[ ! -f "$CONFIG_FILE" ]]; then die "配置文件不存在: $CONFIG_FILE"; fi
 
@@ -365,12 +380,12 @@ add_outbound() {
                 die "解析失败: $(echo "$parsed" | jq -r '.error')"
             fi
             
-            # 提取所有需要的字段
-            local addr port uuid encryption security flow sni pbk sid fp type
+            # 提取所有需要的字段 (新增 spiderx)
+            local addr port uuid encryption security flow sni pbk sid fp type spiderx
             addr=$(echo "$parsed" | jq -r '.address')
             port=$(echo "$parsed" | jq -r '.port')
             uuid=$(echo "$parsed" | jq -r '.uuid')
-            encryption=$(echo "$parsed" | jq -r '.encryption') # Important for VLESS Encryption inbound compatibility
+            encryption=$(echo "$parsed" | jq -r '.encryption')
             security=$(echo "$parsed" | jq -r '.security')
             flow=$(echo "$parsed" | jq -r '.flow')
             sni=$(echo "$parsed" | jq -r '.sni')
@@ -378,11 +393,12 @@ add_outbound() {
             sid=$(echo "$parsed" | jq -r '.sid')
             fp=$(echo "$parsed" | jq -r '.fp')
             type=$(echo "$parsed" | jq -r '.type')
+            spiderx=$(echo "$parsed" | jq -r '.spiderx') # 获取 spiderx
             
             info "解析成功: VLESS $uuid@$addr:$port (Sec: $security, Enc: $encryption)"
 
             # 构建 VLESS JSON
-            # 注意：VLESS Encryption 场景下，Share Link 里的 encryption 参数对应 Outbound User 中的 encryption 字段
+            # 【关键修改】在 realitySettings 中加入 spiderX 字段
             outbound_json=$(jq -n \
                 --arg tag "$tag" \
                 --arg addr "$addr" \
@@ -396,6 +412,7 @@ add_outbound() {
                 --arg sid "$sid" \
                 --arg fp "$fp" \
                 --arg type "$type" \
+                --arg spiderx "$spiderx" \
                 '{
                     tag: $tag,
                     protocol: "vless",
@@ -417,13 +434,14 @@ add_outbound() {
                             serverName: $sni,
                             publicKey: $pbk,
                             shortId: $sid,
-                            fingerprint: $fp
+                            fingerprint: $fp,
+                            spiderX: (if $spiderx != "" then $spiderx else null end)
                         } else null end),
                         tlsSettings: (if $security == "tls" then {
                             serverName: $sni
                         } else null end)
                     }
-                } | del(.streamSettings.realitySettings | select(. == null)) | del(.streamSettings.tlsSettings | select(. == null)) | del(.streamSettings.security | select(. == null))')
+                } | del(.streamSettings.realitySettings | select(. == null)) | del(.streamSettings.realitySettings.spiderX | select(. == null)) | del(.streamSettings.tlsSettings | select(. == null)) | del(.streamSettings.security | select(. == null))')
             ;;
         *) die "无效选择" ;;
     esac
