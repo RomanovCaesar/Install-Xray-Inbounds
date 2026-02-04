@@ -470,18 +470,30 @@ add_routing() {
     
     local in_tags_json="null"
     if [[ -n "$in_tags_raw" ]]; then
-        # split by comma -> json array
-        in_tags_json=$(echo "$in_tags_raw" | jq -R 'split(",") | map(gsub(" "; ""))')
+        # 将输入分割为数组并去除空格
+        in_tags_json=$(echo "$in_tags_raw" | jq -R 'split(",") | map(gsub(" "; "")) | map(select(length > 0))')
     fi
 
     # 2. Conditions
-    echo "请输入分流条件 (回车跳过):"
-    read -rp "1) IP/CIDR (如 8.8.8.8, 192.168.1.0/24, geoip:cn): " ip_cond
-    read -rp "2) Domain/GeoSite (如 google.com, geosite:cn): " domain_cond
+    echo "请输入分流条件 (英文逗号分隔，回车跳过):"
+    read -rp "1) IP/CIDR (如 8.8.8.8, 192.168.1.0/24, geoip:cn): " ip_cond_raw
+    read -rp "2) Domain/GeoSite (如 google.com, geosite:cn): " domain_cond_raw
 
-    if [[ -z "$ip_cond" && -z "$domain_cond" ]]; then
+    if [[ -z "$ip_cond_raw" && -z "$domain_cond_raw" ]]; then
         die "必须至少输入一个条件 (IP 或 Domain)。"
     fi
+
+    # --- 修复逻辑开始：将逗号分隔字符串转为 JSON 数组 ---
+    local ip_json="null"
+    if [[ -n "$ip_cond_raw" ]]; then
+        ip_json=$(echo "$ip_cond_raw" | jq -R 'split(",") | map(gsub(" "; "")) | map(select(length > 0))')
+    fi
+
+    local domain_json="null"
+    if [[ -n "$domain_cond_raw" ]]; then
+        domain_json=$(echo "$domain_cond_raw" | jq -R 'split(",") | map(gsub(" "; "")) | map(select(length > 0))')
+    fi
+    # --- 修复逻辑结束 ---
 
     # 3. Select Outbound
     echo "当前 Outbounds:"
@@ -497,26 +509,27 @@ add_routing() {
         fi
     done
 
-    # 4. Construct Rule
+    # 4. Construct Rule (这里改用 --argjson 直接传入数组)
     local rule_json
     rule_json=$(jq -n \
         --argjson inbounds "$in_tags_json" \
         --arg outbound "$out_tag" \
-        --arg ip "$ip_cond" \
-        --arg domain "$domain_cond" \
+        --argjson ip "$ip_json" \
+        --argjson domain "$domain_json" \
         '{
             type: "field",
             inboundTag: $inbounds,
             outboundTag: $outbound,
-            ip: (if $ip != "" then [$ip] else null end),
-            domain: (if $domain != "" then [$domain] else null end)
-        } | del(.ip | select(. == null)) | del(.domain | select(. == null))')
+            ip: $ip,
+            domain: $domain
+        } | del(.ip | select(. == null)) | del(.domain | select(. == null)) | del(.inboundTag | select(. == null))')
 
     # 5. Write to Config
     local tmp_conf
     tmp_conf=$(mktemp)
     
     # 确保 routing 对象存在，如果不存在则创建，然后追加规则
+    # jq 默认输出是格式化好的（Pretty Print），所以写入文件时会自动换行
     jq --argjson rule "$rule_json" '
         if .routing == null then .routing = {rules: []} else . end |
         if .routing.rules == null then .routing.rules = [] else . end |
