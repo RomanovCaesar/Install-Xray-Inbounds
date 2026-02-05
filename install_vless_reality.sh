@@ -4,8 +4,8 @@
 # Xray VLESS-Reality 一键安装管理脚本
 # 此脚本Fork自https://github.com/yahuisme/xray-vless-reality, 感谢@yahuisme
 # 自从Fork之后，本脚本已经过大量修改重构，感谢ChatGPT和Gemini
-# 版本: V-Fork-Caesar-3.2
-# 更新日志参见commits
+# 版本: V-Fork-Caesar-3.3 (NAT/DDNS 增强版)
+# 更新日志: 新增自定义连接地址支持
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -15,6 +15,7 @@ set -euo pipefail
 readonly SCRIPT_VERSION="V-Final-2.1"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
+readonly address_file="/root/inbound_address.txt" # 自定义地址保存路径
 
 # --- 颜色定义 ---
 readonly red='\e[91m' green='\e[92m' yellow='\e[93m'
@@ -448,6 +449,7 @@ uninstall_xray() {
     rm -rf /usr/local/etc/xray
     rm -rf /usr/local/share/xray
     rm -f ~/xray_vless_reality_link.txt || true
+    rm -f /root/inbound_address.txt # 同时清理地址配置文件
     
     success "Xray 已成功卸载。"
 }
@@ -472,7 +474,6 @@ view_xray_log() {
     fi
 
     # 解除捕获，恢复 Ctrl+C 的默认行为
-    # 在主菜单或其他地方按下 Ctrl+C 依然可以正常退出脚本
     trap - SIGINT
 
     # 手动添加返回提示
@@ -546,6 +547,35 @@ modify_config() {
     view_subscription_info "$port" # 传入端口以精确显示
 }
 
+# --- 自定义连接地址管理 ---
+set_connection_address() {
+    echo ""
+    echo "================================================="
+    echo "         自定义连接地址 (NAT/DDNS 模式)"
+    echo "================================================="
+    echo "说明: 如果您使用的是 NAT VPS 或拥有动态 IP 的机器，"
+    echo "请在此输入外部可访问的 IP 地址或 DDNS 域名。"
+    echo "脚本生成分享链接时将优先使用此地址。"
+    echo "-------------------------------------------------"
+    
+    if [[ -f "$address_file" ]]; then
+        local current_addr=$(cat "$address_file")
+        echo -e "当前已设置: ${cyan}${current_addr}${none}"
+    else
+        echo -e "当前状态: ${yellow}自动获取公网 IP${none}"
+    fi
+    echo ""
+    read -p "请输入新的连接地址 (留空并回车则恢复自动获取): " new_addr
+    
+    if [[ -z "$new_addr" ]]; then
+        rm -f "$address_file"
+        success "已恢复为自动获取公网 IP 模式。"
+    else
+        echo "$new_addr" > "$address_file"
+        success "连接地址已更新为: $new_addr"
+    fi
+}
+
 view_subscription_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在, 请先安装。" && return; fi
     
@@ -600,8 +630,14 @@ view_subscription_info() {
         return 
     fi
 
+    # 4. 确定连接地址 (NAT/DDNS 支持)
     local ip
-    if ! ip=$(get_public_ip); then return 1; fi
+    if [[ -f "$address_file" && -s "$address_file" ]]; then
+        ip=$(cat "$address_file")
+        if [[ -z "$ip" ]]; then if ! ip=$(get_public_ip); then return 1; fi; fi
+    else
+        if ! ip=$(get_public_ip); then return 1; fi
+    fi
     local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
 
     # URL 编码处理
@@ -611,7 +647,7 @@ view_subscription_info() {
     
     local vless_url="vless://${uuid}@${display_ip}:${target_port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}&spx=${spiderx_encoded}#${link_name_encoded}"
 
-    # 4. 独立文件保存逻辑
+    # 5. 独立文件保存逻辑
     local save_file=~/xray_vless_reality_link_${target_port}.txt
 
     if [[ "$is_quiet" = true ]]; then
@@ -752,9 +788,10 @@ main_menu() {
         printf "  ${cyan}%-2s${none} %-35s\n" "6." "修改节点配置"
         printf "  ${green}%-2s${none} %-35s\n" "7." "查看订阅信息"
         echo "---------------------------------------------"
+        printf "  ${magenta}%-2s${none} %-35s\n" "8." "设置连接地址 (NAT/DDNS)"
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
         echo "---------------------------------------------"
-        read -p "请输入选项 [0-7]: " choice
+        read -p "请输入选项 [0-8]: " choice
 
         local needs_pause=true
         case $choice in
@@ -765,8 +802,9 @@ main_menu() {
             5) view_xray_log; needs_pause=false ;;
             6) modify_config ;;
             7) view_subscription_info ;;
+            8) set_connection_address ;;
             0) success "感谢使用！"; exit 0 ;;
-            *) error "无效选项，请输入 0-7 之间的数字。" ;;
+            *) error "无效选项，请输入 0-8 之间的数字。" ;;
         esac
 
         if [ "$needs_pause" = true ]; then
