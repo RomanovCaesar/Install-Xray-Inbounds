@@ -146,6 +146,8 @@ install_xray() {
   info "解压并安装到 /usr/local/bin ..."
   unzip -q -o "$tmpdir/xray.zip" -d "$tmpdir"
   install -m 0755 "$tmpdir/xray" /usr/local/bin/xray
+
+  mkdir -p /usr/local/etc/xray
 }
 
 select_protocol() {
@@ -327,7 +329,6 @@ EOF
 EOF
   fi
 
-  chown xray:xray "$cfg"
   chmod 0644 "$cfg"
   info "配置已更新：$cfg"
 }
