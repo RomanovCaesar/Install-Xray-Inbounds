@@ -43,14 +43,6 @@ ensure_packages() {
   esac
 }
 
-create_xray_user() {
-  if id -u xray >/dev/null 2>&1; then return; fi
-  case "$OS_FAMILY" in
-    debian) adduser --system --no-create-home --shell /usr/sbin/nologin --group xray ;;
-    alpine) addgroup -S xray || true; adduser -S -H -s /sbin/nologin -G xray xray ;;
-  esac
-}
-
 prompt_domain() {
   local input
   read -rp "请输入要使用的 IP 或者域名（留空则使用公网 IP）： " input || true
@@ -154,10 +146,6 @@ install_xray() {
   info "解压并安装到 /usr/local/bin ..."
   unzip -q -o "$tmpdir/xray.zip" -d "$tmpdir"
   install -m 0755 "$tmpdir/xray" /usr/local/bin/xray
-
-  create_xray_user
-  mkdir -p /usr/local/etc/xray
-  chown -R xray:xray /usr/local/etc/xray
 }
 
 select_protocol() {
