@@ -542,12 +542,14 @@ view_subscription_info() {
     local domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$xray_config_path")
     local public_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.publicKey' "$xray_config_path")
     local shortid=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$xray_config_path")
+    local spiderx=$(jq -r '.inbounds[0].streamSettings.realitySettings.spiderX // "/"' "$xray_config_path")
+    local spiderx_encoded=$(echo "$spiderx" | sed 's/\//%2F/g')
     if [[ -z "$public_key" ]]; then error "配置文件中缺少公钥信息,可能是旧版配置,请重新安装以修复。" && return; fi
 
     local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
     local link_name="$(hostname) X-reality"
     local link_name_encoded=$(echo "$link_name" | sed 's/ /%20/g')
-    local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
+    local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}&spx=${spiderx_encoded}#${link_name_encoded}"
 
     if [[ "$is_quiet" = true ]]; then
         echo "${vless_url}"
@@ -564,6 +566,7 @@ view_subscription_info() {
         echo -e "${yellow} SNI: ${cyan}$domain${none}"
         echo -e "${yellow} 公钥: ${cyan}$public_key${none}"
         echo -e "${yellow} ShortId: ${cyan}$shortid${none}"
+        echo -e "${yellow} SpiderX: ${cyan}$spiderx${none}"
         echo "----------------------------------------------------------------"
         echo -e "${green} 订阅链接 (已保存到 ~/xray_vless_reality_link.txt): ${none}\n"; echo -e "${cyan}${vless_url}${none}"
         echo "----------------------------------------------------------------"
