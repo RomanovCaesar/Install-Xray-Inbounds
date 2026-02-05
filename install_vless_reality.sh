@@ -17,7 +17,6 @@ set -euo pipefail
 readonly SCRIPT_VERSION="V-Final-2.1"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
-readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh"
 
 # --- 颜色定义 ---
 readonly red='\e[91m' green='\e[92m' yellow='\e[93m'
@@ -65,73 +64,123 @@ get_public_ip() {
     error "无法获取公网 IP 地址。" && return 1
 }
 
-execute_official_script() {
-    local action="$1"
-    local install_dir="/usr/local/bin"
-    local version url tmpdir arch
+# --- 手动安装核心 ---
+install_xray_core() {
+    info "开始安装 Xray 核心..."
+    
+    # 架构检测
+    local arch machine
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64|amd64) arch="64" ;;
+        aarch64|arm64) arch="arm64-v8a" ;;
+        *) error "不支持的 CPU 架构: $machine"; return 1 ;;
+    esac
 
-    # 判断是否有 systemctl（Debian/Ubuntu）
-    if command -v systemctl >/dev/null 2>&1; then
-        info "检测到 systemd 系统，使用官方 Xray 安装脚本..."
-        if [[ "$is_quiet" = true ]]; then
-            curl -fsSL "$xray_install_script_url" | bash -s -- "$action" >/dev/null 2>&1
-        else
-            curl -fsSL "$xray_install_script_url" | bash -s -- "$action"
-        fi
-        return
+    # 获取最新版本
+    local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+    info "获取 Xray 最新版本信息..."
+    local tag
+    tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
+    
+    local version_str="${tag:-latest}"
+    info "目标版本: $version_str"
+
+    local tmpdir; tmpdir="$(mktemp -d)"
+    local zipname="Xray-linux-${arch}.zip"
+    local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
+    local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
+
+    info "正在下载 Xray ($zipname)..."
+    if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :;
+    elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :;
+    else 
+        rm -rf "$tmpdir"
+        error "下载 Xray 失败"
+        return 1
     fi
 
-    # 否则走手动安装（Alpine/OpenRC）
-    info "检测到非 systemd 系统（如 Alpine / OpenRC），使用手动安装逻辑..."
+    info "解压并安装到 /usr/local/bin ..."
+    unzip -qo "$tmpdir/xray.zip" -d "$tmpdir"
+    install -m 0755 "$tmpdir/xray" "$xray_binary_path"
+    
+    # 确保目录存在
+    mkdir -p /usr/local/etc/xray /usr/local/share/xray
+    
+    rm -rf "$tmpdir"
+    success "Xray 核心安装完成"
+}
 
-    case "$action" in
-        install)
-            # 获取最新版本号
-            version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
-            [[ -z "$version" ]] && { error "获取 Xray 版本号失败"; return 1; }
+install_geodata() {
+    info "正在安装/更新 GeoIP 和 GeoSite 数据文件..."
+    curl -fsSL -o /usr/local/bin/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+    curl -fsSL -o /usr/local/bin/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+    cp -f /usr/local/bin/geoip.dat /usr/local/share/xray/geoip.dat
+    cp -f /usr/local/bin/geosite.dat /usr/local/share/xray/geosite.dat
+    success "Geo 数据文件已更新"
+}
 
-            info "正在下载 Xray-core $version ..."
-            tmpdir=$(mktemp -d)
-            arch=$(uname -m)
-            case "$arch" in
-                x86_64)  arch="64" ;;
-                aarch64) arch="arm64-v8a" ;;
-                armv7l)  arch="arm32-v7a" ;;
-                *) error "不支持的架构: $arch"; rm -rf "$tmpdir"; return 1 ;;
-            esac
+# --- Systemd 服务安装 ---
+install_service_systemd() {
+    info "安装 Systemd 服务 (User=root)..."
+    cat >/etc/systemd/system/xray.service <<'EOF'
+[Unit]
+Description=Xray Service
+After=network-online.target nss-lookup.target
+Wants=network-online.target
 
-            url="https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip"
-            curl -L -o "$tmpdir/xray.zip" "$url" || { error "下载失败"; rm -rf "$tmpdir"; return 1; }
+[Service]
+User=root
+Group=root
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=false
+Restart=on-failure
+RestartSec=3
 
-            unzip -qo "$tmpdir/xray.zip" -d "$tmpdir" || { error "解压失败"; rm -rf "$tmpdir"; return 1; }
-            install -m 755 "$tmpdir/xray" "$install_dir/xray"
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now xray
+    success "Systemd 服务已安装并启动"
+}
 
-            mkdir -p /usr/local/etc/xray /usr/local/share/xray
-            rm -rf "$tmpdir"
+# --- OpenRC 服务安装 ---
+install_service_openrc() {
+    info "安装 OpenRC 服务..."
+    install -d -m 0755 /var/log/xray || true
 
-            success "Xray 核心已安装到 $install_dir/xray"
-            ;;
+    cat >/etc/init.d/xray <<'EOF'
+#!/sbin/openrc-run
+name="xray"
+description="Xray Service"
+command="/usr/local/bin/xray"
+command_args="run -config /usr/local/etc/xray/config.json"
+command_background=true
+pidfile="/run/xray.pid"
+start_stop_daemon_args="--make-pidfile --background"
 
-        install-geodata)
-            info "下载最新 GeoIP / GeoSite 数据文件..."
-            mkdir -p /usr/local/share/xray
-            curl -fsSL -o /usr/local/share/xray/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
-            curl -fsSL -o /usr/local/share/xray/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
-            success "Geo 数据文件已更新"
-            ;;
+depend() {
+  need net
+  use dns
+}
+EOF
+    chmod +x /etc/init.d/xray
+    rc-update add xray default
+    rc-service xray restart || rc-service xray start
+    success "OpenRC 服务已安装并启动"
+}
 
-        remove|--purge)
-            info "卸载 Xray..."
-            rm -f /usr/local/bin/xray /usr/local/etc/xray/config.json
-            rm -rf /usr/local/share/xray
-            success "Xray 已卸载完成"
-            ;;
-
-        *)
-            error "未知操作: $action"
-            return 1
-            ;;
-    esac
+setup_service() {
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        install_service_systemd
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        install_service_openrc
+    else
+        error "无法确定服务管理器，请手动配置自启动。"
+    fi
 }
 
 # --- 改进的验证函数 ---
@@ -183,42 +232,6 @@ detect_system() {
     fi
 }
 
-# --- OpenRC 服务编排（仅 Alpine 等 OpenRC 环境） ---
-ensure_openrc_service() {
-    # 如果是 systemd 则不处理
-    [[ "$INIT_SYSTEM" != "openrc" ]] && return 0
-
-    # 若已存在 init 脚本直接返回
-    if [[ -x /etc/init.d/xray ]]; then
-        return 0
-    fi
-
-    info "检测到 OpenRC，正在创建 /etc/init.d/xray 服务脚本…"
-    install -d -m 0755 /var/log/xray || true
-
-    cat >/etc/init.d/xray <<'EOF'
-#!/sbin/openrc-run
-name="Xray"
-description="Xray (XTLS) service"
-
-command="/usr/local/bin/xray"
-command_args="run -config /usr/local/etc/xray/config.json"
-command_background=true
-pidfile="/run/xray.pid"
-output_log="/var/log/xray/access.log"
-error_log="/var/log/xray/error.log"
-
-depend() {
-    need net
-    use dns logger
-}
-EOF
-
-    chmod +x /etc/init.d/xray
-    rc-update add xray default || true
-    success "OpenRC 服务已创建并加入开机自启。"
-}
-
 service_restart() {
     if [[ "$INIT_SYSTEM" == "systemd" ]]; then
         systemctl restart xray
@@ -240,7 +253,7 @@ service_is_active() {
     fi
 }
 
-# --- 改进的系统兼容性检查（加入 Alpine） ---
+# --- 系统兼容性检查（加入 Alpine） ---
 check_system_compatibility() {
     if [[ "$(uname -s)" != "Linux" ]]; then
         error "错误: 此脚本仅支持 Linux 系统。"
@@ -366,7 +379,7 @@ install_xray() {
         elif is_valid_uuid "$uuid"; then
             break
         else
-            error "UUID格式无效，请输入标准UUID格式 (如: 550e8400-e29b-41d4-a716-446655440000) 或留空自动生成。"
+            error "UUID格式无效，请输入标准UUID格式或留空自动生成。"
         fi
     done
 
@@ -387,10 +400,10 @@ update_xray() {
     if [[ -z "$latest_version" ]]; then error "获取最新版本号失败，请检查网络或稍后再试。" && return; fi
     info "当前版本: ${cyan}${current_version}${none}，最新版本: ${cyan}${latest_version}${none}"
     if [[ "$current_version" == "$latest_version" ]]; then success "您的 Xray 已是最新版本，无需更新。" && return; fi
+    
     info "发现新版本，开始更新..."
-    if ! execute_official_script "install"; then error "Xray 核心更新失败！" && return; fi
-    info "正在更新 GeoIP 和 GeoSite 数据文件..."
-    execute_official_script "install-geodata"
+    if ! install_xray_core; then error "Xray 核心更新失败！" && return; fi
+    install_geodata
 
     if ! restart_xray; then return; fi
     success "Xray 更新成功！"
@@ -419,18 +432,26 @@ uninstall_xray() {
         return
     fi
     info "正在卸载 Xray..."
-    if execute_official_script "remove --purge"; then
-        rm -f ~/xray_vless_reality_link.txt || true
-        # OpenRC 清理
-        if [[ "$INIT_SYSTEM" == "openrc" ]]; then
-            rc-update del xray default >/dev/null 2>&1 || true
-            rm -f /etc/init.d/xray || true
-        fi
-        success "Xray 已成功卸载。"
-    else
-        error "Xray 卸载失败！"
-        return 1
+    
+    # 停止服务
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        systemctl stop xray || true
+        systemctl disable xray || true
+        rm -f /etc/systemd/system/xray.service
+        systemctl daemon-reload
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        rc-service xray stop || true
+        rc-update del xray default || true
+        rm -f /etc/init.d/xray
     fi
+
+    # 删除文件
+    rm -f "$xray_binary_path"
+    rm -rf /usr/local/etc/xray
+    rm -rf /usr/local/share/xray
+    rm -f ~/xray_vless_reality_link.txt || true
+    
+    success "Xray 已成功卸载。"
 }
 
 view_xray_log() {
@@ -439,7 +460,6 @@ view_xray_log() {
     if command -v journalctl >/dev/null 2>&1; then
         journalctl -u xray -f --no-pager
     elif command -v logread >/dev/null 2>&1; then
-        # BusyBox syslog
         logread -f | grep -i xray
     elif [[ -d /var/log/xray ]]; then
         tail -n 200 -F /var/log/xray/*.log 2>/dev/null || tail -n 200 -F /var/log/*.log | grep -i xray
@@ -586,17 +606,15 @@ write_config() {
 
 run_install() {
     local port=$1 uuid=$2 domain=$3
-    info "正在下载并安装 Xray 核心..."
-    if ! execute_official_script "install"; then
+    
+    # 替换为新的手动安装逻辑
+    if ! install_xray_core; then
         error "Xray 核心安装失败！请检查网络连接。"
         exit 1
     fi
 
-    info "正在安装/更新 GeoIP 和 GeoSite 数据文件..."
-    if ! execute_official_script "install-geodata"; then
-        error "Geo-data 更新失败！"
-        info "这通常不影响核心功能，您可以稍后通过更新选项(2)来重试。"
-    fi
+    # 替换为新的 Geodata 安装逻辑
+    install_geodata
 
     info "正在生成 Reality 密钥对..."
     local key_pair=$($xray_binary_path x25519)
@@ -610,8 +628,8 @@ run_install() {
     info "正在写入 Xray 配置文件..."
     write_config "$port" "$uuid" "$domain" "$private_key" "$public_key"
 
-    # OpenRC 环境下确保服务单位存在
-    ensure_openrc_service
+    # 安装服务（包含强制 root 逻辑）
+    setup_service
 
     if ! restart_xray; then exit 1; fi
 
