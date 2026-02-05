@@ -572,7 +572,8 @@ view_subscription_info() {
 
 # --- 核心逻辑函数 ---
 write_config() {
-    local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701"
+    local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701" spiderx="/"
+    
     mkdir -p "$(dirname "$xray_config_path")"
     jq -n \
         --argjson port "$port" \
@@ -581,6 +582,7 @@ write_config() {
         --arg private_key "$private_key" \
         --arg public_key "$public_key" \
         --arg shortid "$shortid" \
+        --arg spiderx "$spiderx" \
     '{
         "log": {"loglevel": "warning"},
         "inbounds": [{
@@ -601,7 +603,8 @@ write_config() {
                     "serverNames": [$domain],
                     "privateKey": $private_key,
                     "publicKey": $public_key,
-                    "shortIds": [$shortid]
+                    "shortIds": [$shortid],
+                    "spiderX": $spiderx
                 }
             },
             "sniffing": {
