@@ -3,11 +3,9 @@
 # ==============================================================================
 # Xray VLESS-Reality 一键安装管理脚本
 # 此脚本Fork自https://github.com/yahuisme/xray-vless-reality, 感谢@yahuisme
-# 版本: V-Fork-Caesar-2.2
-# 更新日志 (V-Fork-Caesar-2.2):
-# - [改进] 默认Outbounds domainStrategy改为AsIs
-# - [改进] 默认Reality sni改为hk.art.museum
-# - [改进] 新增 Alpine 系统识别与兼容（apk 依赖安装、OpenRC 服务管理与日志查看）
+# 自从Fork之后，本脚本已经过大量修改重构，感谢ChatGPT和Gemini
+# 版本: V-Fork-Caesar-3.2
+# 更新日志参见commits
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -484,91 +482,155 @@ view_xray_log() {
 
 modify_config() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装，无法修改配置。" && return; fi
+    
+    # 1. 查找所有 Reality 节点的端口
+    echo "当前 VLESS-Reality 节点:"
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.streamSettings.security == "reality") | .port' "$xray_config_path")
+    
+    if [[ -z "$ports" ]]; then error "未找到 Reality 节点配置。"; return; fi
+    
+    for p in $ports; do echo " - 端口: $p"; done
+    echo ""
+    read -p "请输入要修改的端口 (输入上述端口之一): " target_port
+    
+    # 验证端口是否存在于 reality 节点中
+    if ! echo "$ports" | grep -q "^$target_port$"; then error "端口未找到或不是 Reality 节点"; return; fi
+
     info "读取当前配置..."
-    local current_port=$(jq -r '.inbounds[0].port' "$xray_config_path")
-    local current_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$xray_config_path")
-    local current_domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$xray_config_path")
-    local private_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$xray_config_path")
-    local public_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.publicKey' "$xray_config_path")
+    # 精准读取：只选择端口匹配且是 reality 的节点
+    local node_json
+    node_json=$(jq --argjson p "$target_port" '.inbounds[] | select(.port == $p and .streamSettings.security == "reality")' "$xray_config_path")
+    
+    local current_uuid=$(echo "$node_json" | jq -r '.settings.clients[0].id')
+    local current_domain=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+    local private_key=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.privateKey')
+    local public_key=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.publicKey')
 
     info "请输入新配置，直接回车则保留当前值。"
     local port uuid domain
     
     while true; do
-        read -p "$(echo -e "端口 (当前: ${cyan}${current_port}${none}): ")" port
-        [ -z "$port" ] && port=$current_port
-        if ! is_valid_port "$port"; then
-            error "端口无效，请输入一个1-65535之间的数字。"
-            continue
-        fi
-        if [[ "$port" != "$current_port" ]] && is_port_in_use "$port"; then
-            error "端口 $port 已被占用，请选择其他端口。"
-            continue
-        fi
+        read -p "$(echo -e "端口 (当前: ${cyan}${target_port}${none}): ")" port
+        [ -z "$port" ] && port=$target_port
+        if ! is_valid_port "$port"; then error "端口无效"; continue; fi
+        # 如果改了端口，需要检查新端口是否被占用
+        if [[ "$port" != "$target_port" ]] && is_port_in_use "$port"; then error "端口已被占用"; continue; fi
         break
     done
     
     while true; do
         read -p "$(echo -e "UUID (当前: ${cyan}${current_uuid}${none}): ")" uuid
         [ -z "$uuid" ] && uuid=$current_uuid
-        if is_valid_uuid "$uuid"; then
-            break
-        else
-            error "UUID格式无效，请输入标准UUID格式。"
-        fi
+        if is_valid_uuid "$uuid"; then break; else error "UUID格式无效"; fi
     done
     
     while true; do
         read -p "$(echo -e "SNI域名 (当前: ${cyan}${current_domain}${none}): ")" domain
         [ -z "$domain" ] && domain=$current_domain
-        if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
+        if is_valid_domain "$domain"; then break; else error "域名格式无效"; fi
     done
 
+    info "正在更新配置..."
+    
+    # 2. 删除旧节点 (精准删除)
+    local tmp_file; tmp_file=$(mktemp)
+    jq --argjson p "$target_port" 'del(.inbounds[] | select(.port == $p and .streamSettings.security == "reality"))' "$xray_config_path" > "$tmp_file" && mv "$tmp_file" "$xray_config_path"
+
+    # 3. 写入新节点 (复用追加逻辑)
     write_config "$port" "$uuid" "$domain" "$private_key" "$public_key"
+    
     if ! restart_xray; then return; fi
 
     success "配置修改成功！"
-    view_subscription_info
+    view_subscription_info "$port" # 传入端口以精确显示
 }
 
 view_subscription_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在, 请先安装。" && return; fi
     
+    # 1. 扫描所有 Reality 节点
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.streamSettings.security == "reality") | .port' "$xray_config_path")
+
+    if [[ -z "$ports" ]]; then
+        error "未找到任何 VLESS-Reality 节点配置。"
+        return
+    fi
+
+    local target_port=""
+    local port_count=$(echo "$ports" | wc -l)
+
+    # 2. 智能选择逻辑
+    if [[ "$port_count" -eq 1 ]]; then
+        # 只有一个节点，自动选择
+        target_port=$(echo "$ports" | tr -d ' \n')
+    else
+        # 多个节点，列出并让用户选择
+        echo "发现多个 Reality 节点:"
+        for p in $ports; do echo " - 端口: $p"; done
+        echo ""
+        
+        while true; do
+            read -p "请输入要查看的端口: " input_p
+            # 验证输入是否在列表里
+            if echo "$ports" | grep -q "^$input_p$"; then
+                target_port=$input_p
+                break
+            else
+                error "无效端口，请从列表中选择。"
+            fi
+        done
+    fi
+
+    # 3. 精准读取选中节点的配置
+    local node_json
+    node_json=$(jq --argjson p "$target_port" '.inbounds[] | select(.port == $p and .streamSettings.security == "reality")' "$xray_config_path")
+    
+    if [[ -z "$node_json" ]]; then error "读取配置失败"; return; fi
+
+    local uuid=$(echo "$node_json" | jq -r '.settings.clients[0].id')
+    local domain=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+    local public_key=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.publicKey')
+    local shortid=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+    local spiderx=$(echo "$node_json" | jq -r '.streamSettings.realitySettings.spiderX // "/"')
+
+    if [[ -z "$public_key" || "$public_key" == "null" ]]; then 
+        error "端口 $target_port 的配置缺少公钥信息。"
+        return 
+    fi
+
     local ip
     if ! ip=$(get_public_ip); then return 1; fi
-
-    local uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$xray_config_path")
-    local port=$(jq -r '.inbounds[0].port' "$xray_config_path")
-    local domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$xray_config_path")
-    local public_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.publicKey' "$xray_config_path")
-    local shortid=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0]' "$xray_config_path")
-    local spiderx=$(jq -r '.inbounds[0].streamSettings.realitySettings.spiderX // "/"' "$xray_config_path")
-    local spiderx_encoded=$(echo "$spiderx" | sed 's/\//%2F/g')
-    if [[ -z "$public_key" ]]; then error "配置文件中缺少公钥信息,可能是旧版配置,请重新安装以修复。" && return; fi
-
     local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
-    local link_name="$(hostname) X-reality"
+
+    # URL 编码处理
+    local spiderx_encoded=$(echo "$spiderx" | sed 's/\//%2F/g')
+    local link_name="$(hostname)-${target_port}"
     local link_name_encoded=$(echo "$link_name" | sed 's/ /%20/g')
-    local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}&spx=${spiderx_encoded}#${link_name_encoded}"
+    
+    local vless_url="vless://${uuid}@${display_ip}:${target_port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}&spx=${spiderx_encoded}#${link_name_encoded}"
+
+    # 4. 独立文件保存逻辑
+    local save_file=~/xray_vless_reality_link_${target_port}.txt
 
     if [[ "$is_quiet" = true ]]; then
         echo "${vless_url}"
     else
-        echo "${vless_url}" > ~/xray_vless_reality_link.txt
+        echo "${vless_url}" > "$save_file"
+        
         echo "----------------------------------------------------------------"
         echo -e "${green} --- Xray VLESS-Reality 订阅信息 --- ${none}"
         echo -e "${yellow} 名称: ${cyan}$link_name${none}"
         echo -e "${yellow} 地址: ${cyan}$ip${none}"
-        echo -e "${yellow} 端口: ${cyan}$port${none}"
+        echo -e "${yellow} 端口: ${cyan}$target_port${none}"
         echo -e "${yellow} UUID: ${cyan}$uuid${none}"
         echo -e "${yellow} 流控: ${cyan}"xtls-rprx-vision"${none}"
-        echo -e "${yellow} 指纹: ${cyan}"chrome"${none}"
         echo -e "${yellow} SNI: ${cyan}$domain${none}"
-        echo -e "${yellow} 公钥: ${cyan}$public_key${none}"
-        echo -e "${yellow} ShortId: ${cyan}$shortid${none}"
         echo -e "${yellow} SpiderX: ${cyan}$spiderx${none}"
         echo "----------------------------------------------------------------"
-        echo -e "${green} 订阅链接 (已保存到 ~/xray_vless_reality_link.txt): ${none}\n"; echo -e "${cyan}${vless_url}${none}"
+        echo -e "${green} 订阅链接 (已保存到 $save_file): ${none}\n"
+        echo -e "${cyan}${vless_url}${none}"
         echo "----------------------------------------------------------------"
     fi
 }
@@ -576,9 +638,10 @@ view_subscription_info() {
 # --- 核心逻辑函数 ---
 write_config() {
     local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701" spiderx="/"
-    
-    mkdir -p "$(dirname "$xray_config_path")"
-    jq -n \
+    local tag="vless-reality-in-$port"
+
+    # 构造单个 Inbound 的 JSON 对象
+    local inbound_json=$(jq -n \
         --argjson port "$port" \
         --arg uuid "$uuid" \
         --arg domain "$domain" \
@@ -586,42 +649,53 @@ write_config() {
         --arg public_key "$public_key" \
         --arg shortid "$shortid" \
         --arg spiderx "$spiderx" \
+        --arg tag "$tag" \
     '{
-        "log": {"loglevel": "warning"},
-        "inbounds": [{
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": ($domain + ":443"),
-                    "xver": 0,
-                    "serverNames": [$domain],
-                    "privateKey": $private_key,
-                    "publicKey": $public_key,
-                    "shortIds": [$shortid],
-                    "spiderX": $spiderx
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
+        "listen": "0.0.0.0",
+        "port": $port,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "show": false,
+                "dest": ($domain + ":443"),
+                "xver": 0,
+                "serverNames": [$domain],
+                "privateKey": $private_key,
+                "publicKey": $public_key,
+                "shortIds": [$shortid],
+                "spiderX": $spiderx
             }
-        }],
-        "outbounds": [{
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "AsIs"
-            }
-        }]
-    }' > "$xray_config_path"
+        },
+        "sniffing": {
+            "enabled": false
+        },
+        "tag": $tag
+    }')
+
+    # 1. 如果配置不存在，初始化基础结构
+    if [[ ! -f "$xray_config_path" ]]; then
+        mkdir -p "$(dirname "$xray_config_path")"
+        echo '{ "log": { "loglevel": "warning" }, "inbounds": [], "outbounds": [{ "protocol": "freedom", "settings": {"domainStrategy": "AsIs"}, "tag": "direct" }, { "protocol": "blackhole", "tag": "blocked" }] }' > "$xray_config_path"
+    fi
+
+    # 2. 备份当前配置
+    cp "$xray_config_path" "${xray_config_path}.bak.$(date +%s)"
+
+    # 3. 使用 jq 追加新的 inbound 到数组末尾
+    local tmp_file; tmp_file=$(mktemp)
+    jq --argjson new "$inbound_json" '
+        if .inbounds == null then .inbounds = [] else . end |
+        .inbounds += [$new]
+    ' "$xray_config_path" > "$tmp_file" && mv "$tmp_file" "$xray_config_path"
+
+    chmod 644 "$xray_config_path" || true
+    # 不再打印整个路径，保持清爽，外层函数会提示成功
 }
 
 run_install() {
