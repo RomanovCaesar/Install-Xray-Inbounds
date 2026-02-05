@@ -1,340 +1,129 @@
-#!/usr/bin/env bash
-# install_ss2022_xray.sh
-# 安装/追加 Xray 的 Shadowsocks 入站（aes-128/256-gcm 或 chacha20-ietf-poly1305 或 2022-blake3-aes-128/256-gcm 或 2022-blake3-chacha20-poly1305）
-# 适配 Debian/Ubuntu/Alpine（OpenRC 后台运行）；支持可选域名；支持自定义密码
-# 检测旧配置则追加 inbound；检测端口冲突（配置内&系统监听）；自动生成唯一 tag
+#!/bin/bash
+
+# ==============================================================================
+# Xray Shadowsocks 2022 一键安装管理脚本
+# 架构重构版：模仿 VLESS-Reality 脚本体验，支持多协议共存
+# 版本: V-SS-Reborn-1.1 (NAT/DDNS 增强版)
+# 功能:
+# - 安装/管理 Shadowsocks (Legacy & 2022)
+# - 智能追加配置 (不覆盖 VLESS 节点)
+# - 多端口/多节点管理
+# - 自动配置 Systemd/OpenRC (Root 用户)
+# - [新增] 支持自定义连接地址 (用于 NAT/DDNS 场景)
+# ==============================================================================
+
+# --- Shell 严格模式 ---
 set -euo pipefail
 
-die() { echo -e "\e[31m[ERROR]\e[0m $*" >&2; exit 1; }
-info(){ echo -e "\e[32m[INFO]\e[0m $*"; }
-warn(){ echo -e "\e[33m[WARN]\e[0m $*"; }
+# --- 全局常量 ---
+readonly SCRIPT_VERSION="V-SS-Reborn-1.1"
+readonly xray_config_path="/usr/local/etc/xray/config.json"
+readonly xray_binary_path="/usr/local/bin/xray"
+readonly address_file="/root/inbound_address.txt" # 自定义地址保存路径
 
-require_root() {
-  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    die "请以 root 身份运行（使用 sudo）"
-  fi
-}
+# --- 颜色定义 ---
+readonly red='\e[91m' green='\e[92m' yellow='\e[93m'
+readonly magenta='\e[95m' cyan='\e[96m' none='\e[0m'
 
-detect_os() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    OS_ID="${ID,,}"
-  else
-    die "无法检测系统类型（缺少 /etc/os-release）"
-  fi
-  case "$OS_ID" in
-    debian|ubuntu) OS_FAMILY="debian" ;;
-    alpine)        OS_FAMILY="alpine" ;;
-    *)             die "当前系统不受支持：$OS_ID（仅支持 Debian/Ubuntu/Alpine）" ;;
-  esac
-  info "检测到系统：$PRETTY_NAME"
-}
+# --- 全局变量 ---
+xray_status_info=""
+is_quiet=false
+OS_ID=""
+INIT_SYSTEM=""
 
-ensure_packages() {
-  case "$OS_FAMILY" in
-    debian)
-      apt-get update -y
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip xz-utils openssl python3 jq net-tools iproute2
-      ;;
-    alpine)
-      apk add --no-cache ca-certificates curl unzip xz openssl python3 jq iproute2 net-tools
-      ;;
-  esac
-}
+# --- 辅助函数 ---
+error() { echo -e "\n${red}[✖] $1${none}\n" >&2; }
+info()  { [[ "$is_quiet" = false ]] && echo -e "\n${yellow}[!] $1${none}\n"; }
+success(){ [[ "$is_quiet" = false ]] && echo -e "\n${green}[✔] $1${none}\n"; }
 
-prompt_domain() {
-  local input
-  read -rp "请输入要使用的 IP 或者域名（留空则使用公网 IP）： " input || true
-  input="$(echo -n "$input" | awk '{$1=$1;print}')"  # trim
-  if [[ -z "$input" ]]; then
-    SERVER_DOMAIN=""
-    info "未输入 IP 或域名，将在稍后使用公网 IP。"
-  else
-    input="${input,,}"
-    SERVER_DOMAIN="$input"
-    info "将使用 IP 或域名：$SERVER_DOMAIN"
-  fi
-}
-
-# ===== 端口输入与冲突检测 =====
-read_port_once() {
-  local input
-  read -rp "请输入 Shadowsocks 2022 入站端口（1-65535，默认 40000）： " input || true
-  input="${input:-40000}"
-  [[ "$input" =~ ^[0-9]+$ ]] && (( input>=1 && input<=65535 )) || die "端口无效：$input"
-  echo "$input"
-}
-
-port_in_config_inuse() {
-  local cfg="/usr/local/etc/xray/config.json" p="$1"
-  [[ -s "$cfg" ]] || return 1
-  jq -e --argjson p "$p" '
-    try (
-      if .inbounds == null then
-        false
-      elif (.inbounds|type)!="array" then
-        (.inbounds.port? // empty) == $p
-      else
-        any(.inbounds[]?; (.port? // empty) == $p)
-      end
-    ) catch false
-  ' "$cfg" >/dev/null 2>&1
-}
-
-port_in_system_inuse() {
-  local p="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)" && return 0
-    ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${p}([[:space:]]|$)" && return 0
-    return 1
-  elif command -v netstat >/dev/null 2>&1; then
-    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}([[:space:]]|$)"
-    return $?
-  else
-    return 1
-  fi
-}
-
-prompt_port_until_free() {
-  while :; do
-    local p; p="$(read_port_once)"
-    if port_in_config_inuse "$p"; then
-      warn "端口 $p 已在 Xray 现有配置的 inbounds 中使用，请换一个。"
-      continue
+spinner() {
+    local pid=$1; local spinstr='|/-\\'
+    if [[ "$is_quiet" = true ]]; then
+        wait "$pid"
+        return
     fi
-    if port_in_system_inuse "$p"; then
-      warn "端口 $p 已被系统中其它进程监听（TCP/UDP），请换一个。"
-      continue
-    fi
-    SS_PORT="$p"
-    info "将使用端口：$SS_PORT"
-    break
-  done
+    while ps -p "$pid" > /dev/null 2>&1; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep 0.1
+        printf "\r"
+    done
+    printf "    \r"
 }
 
-install_xray() {
-  # --- 架构检测修复 ---
-  local arch
-  local machine
-  machine="$(uname -m)"
-  case "$machine" in
-    x86_64|amd64) arch="64" ;;
-    aarch64|arm64) arch="arm64-v8a" ;;
-    *) die "不支持的 CPU 架构: $machine" ;;
-  esac
-  # ------------------
-
-  local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-  info "获取 Xray 最新版本信息..."
-  local tag
-  tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
-  [[ -n "${tag:-}" ]] && info "最新版本：$tag" || warn "无法从 GitHub API 获取最新版本，使用 latest 直链"
-
-  local tmpdir=""; trap 'test -n "${tmpdir:-}" && rm -rf "$tmpdir"' EXIT; tmpdir="$(mktemp -d)"
-  
-  # 使用动态架构名称
-  local zipname="Xray-linux-${arch}.zip"
-  
-  local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
-  local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
-
-  info "下载 Xray ($zipname)..."
-  if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :; \
-  elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :; else die "下载 Xray 失败"; fi
-
-  info "解压并安装到 /usr/local/bin ..."
-  unzip -q -o "$tmpdir/xray.zip" -d "$tmpdir"
-  install -m 0755 "$tmpdir/xray" /usr/local/bin/xray
-
-  mkdir -p /usr/local/etc/xray
+get_public_ip() {
+    local ip
+    for cmd in "curl -4s --max-time 5" "wget -4qO- --timeout=5"; do
+        for url in "https://api.ipify.org" "https://ip.sb" "https://checkip.amazonaws.com"; do
+            ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
+        done
+    done
+    for cmd in "curl -6s --max-time 5" "wget -6qO- --timeout=5"; do
+        for url in "https://api64.ipify.org" "https://ip.sb"; do
+            ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
+        done
+    done
+    error "无法获取公网 IP 地址。" && return 1
 }
 
-select_protocol() {
-  echo
-  echo "================ 请选择协议类型 ================"
-  echo "  1) Shadowsocks (ss)"
-  echo "  2) Shadowsocks 2022 (ss2022)"
-  echo "================================================"
-  read -rp "请输入编号（1/2）： " PROTO_SELECT || true
-
-  case "$PROTO_SELECT" in
-    1)
-      PROTOCOL="ss"
-      info "已选择：Shadowsocks (ss)"
-      ;;
-    2)
-      PROTOCOL="ss2022"
-      info "已选择：Shadowsocks 2022 (ss2022)"
-      ;;
-    *)
-      die "输入无效：必须是 1 或 2"
-      ;;
-  esac
-}
-
-generate_key() {
-
-  if [[ "$PROTOCOL" = "ss" ]]; then
-
-    echo
-    echo "================ Shadowsocks 加密方式选择 ================"
-    echo "  1) aes-128-gcm  （16 字节密钥）"
-    echo "  2) aes-256-gcm  （32 字节密钥）"
-    echo "  3) chacha20-ietf-poly1305  （32 字节密钥）"
-    echo "=========================================================="
-    read -rp "请输入加密方式编号（1/2/3，默认选2）： " msel || true
-    msel="${msel:-2}"
-
-    case "$msel" in
-      1)
-        SS_METHOD="aes-128-gcm"
-        KEY_BYTES=16
-        ;;
-      2)
-        SS_METHOD="aes-256-gcm"
-        KEY_BYTES=32
-        ;;
-      3)
-        SS_METHOD="chacha20-ietf-poly1305"
-        KEY_BYTES=32
-        ;;
-      *)
-        die "无效选择，请输入 1，2 或 3"
-        ;;
+# --- 核心安装逻辑 ---
+install_xray_core() {
+    info "开始安装 Xray 核心..."
+    
+    local arch machine
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64|amd64) arch="64" ;;
+        aarch64|arm64) arch="arm64-v8a" ;;
+        *) error "不支持的 CPU 架构: $machine"; return 1 ;;
     esac
 
-  else  # ss2022
+    local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+    info "获取 Xray 最新版本信息..."
+    local tag
+    tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
+    
+    local version_str="${tag:-latest}"
+    info "目标版本: $version_str"
 
-    echo
-    echo "================ Shadowsocks 2022 加密方式选择 ================"
-    echo "  1) 2022-blake3-aes-128-gcm  （16 字节密钥）"
-    echo "  2) 2022-blake3-aes-256-gcm  （32 字节密钥）"
-    echo "  3) 2022-blake3-chacha20-poly1305  （32 字节密钥）"
-    echo "=============================================================="
-    read -rp "请输入加密方式编号（1/2/3，默认选2）： " msel || true
-    msel="${msel:-2}"
+    local tmpdir; tmpdir="$(mktemp -d)"
+    local zipname="Xray-linux-${arch}.zip"
+    local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
+    local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
 
-    case "$msel" in
-      1)
-        SS_METHOD="2022-blake3-aes-128-gcm"
-        KEY_BYTES=16
-        ;;
-      2)
-        SS_METHOD="2022-blake3-aes-256-gcm"
-        KEY_BYTES=32
-        ;;
-      3)
-        SS_METHOD="2022-blake3-chacha20-poly1305"
-        KEY_BYTES=32
-        ;;
-      *)
-        die "无效选择，请输入 1，2 或 3"
-        ;;
-    esac
-  fi
-
-  echo
-  echo "================ 密码设置 ================"
-  read -rp "请输入密码（留空则自动生成随机密码，注意自己输入密码需要格式正确，本脚本不做检查）： " input || true
-  input="$(echo -n "$input" | awk '{$1=$1;print}')"
-
-  if [[ -n "$input" ]]; then
-    SS_KEY_B64="$input"
-    info "使用用户自定义密码。"
-  else
-    SS_KEY_B64="$(openssl rand -base64 $KEY_BYTES | tr -d '\n')"
-    [[ -n "$SS_KEY_B64" ]] || die "密码生成失败"
-    info "未输入密码，已自动生成随机密码（${KEY_BYTES} 字节）"
-  fi
-}
-
-backup_config_if_exists() {
-  local cfg="/usr/local/etc/xray/config.json"
-  if [[ -s "$cfg" ]]; then
-    local ts; ts="$(date +%Y%m%d-%H%M%S)"
-    local backup="/root/xray-config-backup-${ts}.json"
-    cp -a "$cfg" "$backup"
-    info "已备份现有配置到：$backup"
-  fi
-}
-
-# ===== 生成唯一 inbound tag =====
-generate_unique_tag() {
-  local cfg="/usr/local/etc/xray/config.json"
-  local base="ss-2022-in-${SS_PORT}"
-  SS_TAG="$base"
-
-  if [[ -s "$cfg" ]] && jq empty "$cfg" >/dev/null 2>&1; then
-    # 如果已存在相同 tag，则追加 -2、-3...
-    if jq -e --arg t "$SS_TAG" '((.inbounds // []) | map(.tag // "") | index($t)) != null' "$cfg" >/dev/null; then
-      local n=2
-      while :; do
-        SS_TAG="${base}-${n}"
-        jq -e --arg t "$SS_TAG" '((.inbounds // []) | map(.tag // "") | index($t)) == null' "$cfg" >/dev/null && break
-        n=$((n+1))
-      done
+    info "正在下载 Xray ($zipname)..."
+    if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :;
+    elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :;
+    else 
+        rm -rf "$tmpdir"
+        error "下载 Xray 失败"
+        return 1
     fi
-  fi
-  info "将使用 inbound tag：$SS_TAG"
+
+    info "解压并安装到 /usr/local/bin ..."
+    unzip -qo "$tmpdir/xray.zip" -d "$tmpdir"
+    install -m 0755 "$tmpdir/xray" "$xray_binary_path"
+    
+    mkdir -p /usr/local/etc/xray /usr/local/share/xray
+    
+    rm -rf "$tmpdir"
+    success "Xray 核心安装完成"
 }
 
-append_or_create_config() {
-  local cfg="/usr/local/etc/xray/config.json"
-
-  # 生成将要追加的新 inbound（不启用 sniffing）
-  local new_inbound
-  new_inbound="$(cat <<EOF
-{
-  "port": $SS_PORT,
-  "protocol": "shadowsocks",
-  "settings": {
-    "method": "$SS_METHOD",
-    "password": "$SS_KEY_B64",
-    "network": "tcp,udp"
-  },
-  "tag": "$SS_TAG"
-}
-EOF
-)"
-
-  if [[ -s "$cfg" ]]; then
-    info "检测到已有 Xray 配置，尝试追加一个 ss-2022 inbound ..."
-    if ! jq empty "$cfg" >/dev/null 2>&1; then
-      die "现有配置不是有效 JSON，请手动检查：$cfg"
-    fi
-    local tmp; tmp="$(mktemp)"
-    jq --argjson inbound "$new_inbound" '
-      if .inbounds == null then
-        .inbounds = [$inbound]
-      elif (.inbounds|type) != "array" then
-        .inbounds = [ .inbounds, $inbound ]
-      else
-        .inbounds += [ $inbound ]
-      end
-    ' "$cfg" > "$tmp"
-    mv "$tmp" "$cfg"
-    info "已在原有配置中追加 inbound。"
-  else
-    info "未检测到现有配置，生成新的配置文件 ..."
-    cat > "$cfg" <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [ $new_inbound ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "blocked" }
-  ]
-}
-EOF
-  fi
-
-  chmod 0644 "$cfg"
-  info "配置已更新：$cfg"
+install_geodata() {
+    info "正在安装/更新 GeoIP 和 GeoSite 数据文件..."
+    curl -fsSL -o /usr/local/bin/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+    curl -fsSL -o /usr/local/bin/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+    cp -f /usr/local/bin/geoip.dat /usr/local/share/xray/geoip.dat
+    cp -f /usr/local/bin/geosite.dat /usr/local/share/xray/geosite.dat
+    success "Geo 数据文件已更新"
 }
 
+# --- Systemd 服务安装 (User=root) ---
 install_service_systemd() {
-  cat >/etc/systemd/system/xray.service <<'EOF'
+    info "安装 Systemd 服务 (User=root)..."
+    cat >/etc/systemd/system/xray.service <<'EOF'
 [Unit]
 Description=Xray Service
 After=network-online.target nss-lookup.target
@@ -353,18 +142,22 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable --now xray
+    systemctl daemon-reload
+    systemctl enable --now xray
+    success "Systemd 服务已安装并启动"
 }
 
+# --- OpenRC 服务安装 ---
 install_service_openrc() {
-  cat >/etc/init.d/xray <<'EOF'
+    info "安装 OpenRC 服务..."
+    install -d -m 0755 /var/log/xray || true
+
+    cat >/etc/init.d/xray <<'EOF'
 #!/sbin/openrc-run
 name="xray"
 description="Xray Service"
 command="/usr/local/bin/xray"
 command_args="run -config /usr/local/etc/xray/config.json"
-# 后台运行并写入 pidfile，避免安装流程卡在前台
 command_background=true
 pidfile="/run/xray.pid"
 start_stop_daemon_args="--make-pidfile --background"
@@ -374,108 +167,474 @@ depend() {
   use dns
 }
 EOF
-  chmod +x /etc/init.d/xray
-  rc-update add xray default
-  rc-service xray restart || rc-service xray start
+    chmod +x /etc/init.d/xray
+    rc-update add xray default
+    rc-service xray restart || rc-service xray start
+    success "OpenRC 服务已安装并启动"
 }
 
 setup_service() {
-  if command -v systemctl >/dev/null 2>&1; then
-    install_service_systemd
-  elif command -v rc-update >/dev/null 2>&1; then
-    install_service_openrc
-  else
-    die "未检测到 systemd 或 OpenRC，无法安装服务"
-  fi
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        install_service_systemd
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        install_service_openrc
+    else
+        error "无法确定服务管理器，请手动配置自启动。"
+    fi
 }
 
-detect_address() {
-  if [[ -n "${SERVER_DOMAIN:-}" ]]; then
-    SERVER_ADDR="$SERVER_DOMAIN"; return
-  fi
-  local ipv4=""
-  ipv4="$(curl -fsSL http://api.ipify.org || true)"
-  [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ip.sb || true)"
-  [[ -n "$ipv4" ]] || ipv4="$(curl -fsSL http://ifconfig.me || true)"
-  [[ -n "$ipv4" ]] || ipv4="$(hostname -I 2>/dev/null | awk '{print $1}')" || true
-  SERVER_ADDR="${ipv4:-<SERVER_IP>}"
-  if [[ "$SERVER_ADDR" = "<SERVER_IP>" ]]; then
-    warn "无法自动探测公网 IP，请手动替换分享链接中的 <SERVER_IP>"
-  fi
+# --- 验证函数 ---
+is_valid_port() {
+    local port=$1
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
-print_ss_uri() {
-  local enc_pw tag_enc
-  enc_pw="$(python3 - <<'PY'
-import urllib.parse, os
-print(urllib.parse.quote(os.environ.get("PW",""), safe=''))
-PY
-)"
-  tag_enc="$(python3 - <<'PY'
-import urllib.parse
-print(urllib.parse.quote("xray-ss2022", safe=''))
-PY
-)"
-  local uri="ss://${SS_METHOD}:${enc_pw}@${SERVER_ADDR}:${SS_PORT}#${tag_enc}"
-
-  echo
-  echo "================ Shadowsocks 2022 配置信息 ================"
-  echo "Method : $SS_METHOD"
-  echo "Port   : $SS_PORT"
-  echo "Tag    : $SS_TAG"
-  echo "Key(B64): $SS_KEY_B64"
-  echo "Server : $SERVER_ADDR"
-  echo
-  echo "SS 分享链接（SIP002）："
-  echo "$uri"
-  echo "==========================================================="
-
-  # 新增部分：保存分享链接到文件
-  local link_file="/root/xray_ss2022_link.txt"
-  {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
-    echo "$uri"
-    echo
-  } >> "$link_file"
-
-  info "已将分享链接保存到：$link_file"
+is_port_in_use() {
+    local port=$1
+    # 检查系统监听
+    if command -v ss &>/dev/null; then
+        ss -tuln 2>/dev/null | grep -q ":$port " && return 0
+    elif command -v netstat &>/dev/null; then
+        netstat -tuln 2>/dev/null | grep -q ":$port " && return 0
+    elif command -v lsof &>/dev/null; then
+        lsof -i ":$port" &>/dev/null
+    else
+        (echo > "/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1 && return 0
+    fi
+    
+    # 检查 Config 文件中是否已经占用了该端口 (防止 Xray 内部冲突)
+    if [[ -f "$xray_config_path" ]]; then
+         if jq -e --argjson p "$port" '.inbounds[]? | select(.port == $p)' "$xray_config_path" >/dev/null 2>&1; then
+             return 0
+         fi
+    fi
+    return 1
 }
 
-restart_service() {
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart xray || true
-    systemctl status xray --no-pager -l || true
-  else
-    rc-service xray restart || true
-    rc-service xray status || true
-  fi
+# --- 系统检测 ---
+detect_system() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS_ID=${ID:-}
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service >/dev/null 2>&1; then
+        INIT_SYSTEM="openrc"
+    else
+        INIT_SYSTEM="unknown"
+    fi
+}
+
+check_system_compatibility() {
+    if [[ "$(uname -s)" != "Linux" ]]; then error "仅支持 Linux"; return 1; fi
+    detect_system
+    
+    local required_commands=("awk" "grep" "sed" "jq" "curl" "openssl")
+    local missing_commands=()
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing_commands+=("$cmd")
+    done
+    if [[ ${#missing_commands[@]} -gt 0 ]]; then
+        info "正在安装缺失依赖: ${missing_commands[*]} ..."
+        if [[ "$OS_ID" == "alpine" ]]; then
+            apk add --no-cache "${missing_commands[@]}" bash iproute2 coreutils
+        elif command -v apt-get >/dev/null; then
+            DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_commands[@]}"
+        fi
+    fi
+    return 0
+}
+
+pre_check() {
+    [[ $(id -u) != 0 ]] && error "必须以 root 运行" && exit 1
+    check_system_compatibility
+}
+
+check_xray_status() {
+    if [[ ! -f "$xray_binary_path" ]]; then xray_status_info="  Xray 状态: ${red}未安装${none}"; return; fi
+    local xray_version=$($xray_binary_path version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
+    local service_status
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        systemctl is-active --quiet xray && service_status="${green}运行中${none}" || service_status="${yellow}未运行${none}"
+    elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+        rc-service xray status 2>/dev/null | grep -qi started && service_status="${green}运行中${none}" || service_status="${yellow}未运行${none}"
+    fi
+    xray_status_info="  Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
+}
+
+# --- 核心 SS 配置逻辑 ---
+
+select_method_and_password() {
+    echo ""
+    echo "请选择 Shadowsocks 加密协议:"
+    echo "  ${green}1.${none} 2022-blake3-aes-128-gcm   (推荐, 16字节密钥)"
+    echo "  ${green}2.${none} 2022-blake3-aes-256-gcm   (推荐, 32字节密钥)"
+    echo "  ${green}3.${none} 2022-blake3-chacha20-poly1305 (推荐, 32字节密钥)"
+    echo "  ${yellow}4.${none} aes-128-gcm   (传统, 16字节密钥)"
+    echo "  ${yellow}5.${none} aes-256-gcm   (传统, 32字节密钥)"
+    echo "  ${yellow}6.${none} chacha20-ietf-poly1305 (传统, 32字节密钥)"
+    read -p "请输入选项 [1-6] (默认 2): " method_choice
+    [ -z "$method_choice" ] && method_choice=2
+
+    local key_len=32
+    case $method_choice in
+        1) SS_METHOD="2022-blake3-aes-128-gcm"; key_len=16 ;;
+        2) SS_METHOD="2022-blake3-aes-256-gcm"; key_len=32 ;;
+        3) SS_METHOD="2022-blake3-chacha20-poly1305"; key_len=32 ;;
+        4) SS_METHOD="aes-128-gcm"; key_len=16 ;;
+        5) SS_METHOD="aes-256-gcm"; key_len=32 ;;
+        6) SS_METHOD="chacha20-ietf-poly1305"; key_len=32 ;;
+        *) error "无效选择，默认使用 2022-blake3-aes-256-gcm"; SS_METHOD="2022-blake3-aes-256-gcm"; key_len=32 ;;
+    esac
+
+    echo ""
+    read -p "$(echo -e "请输入密码 (留空生成随机 ${key_len} 字节密码): ")" user_pass
+    if [[ -z "$user_pass" ]]; then
+        SS_PASSWORD=$(openssl rand -base64 $key_len | tr -d '\n')
+        info "已自动生成密码: ${cyan}${SS_PASSWORD}${none}"
+    else
+        SS_PASSWORD="$user_pass"
+    fi
+}
+
+# --- 智能追加配置函数 (不覆盖) ---
+append_ss_config() {
+    local port=$1 method=$2 password=$3
+    local tag="ss-in-${port}"
+    
+    # 构造 Inbound JSON
+    local inbound_json
+    inbound_json=$(jq -n \
+        --argjson port "$port" \
+        --arg method "$method" \
+        --arg pass "$password" \
+        --arg tag "$tag" \
+        '{
+            port: $port,
+            protocol: "shadowsocks",
+            settings: {
+                method: $method,
+                password: $pass,
+                network: "tcp,udp"
+            },
+            tag: $tag
+        }')
+
+    # 1. 如果文件不存在，初始化
+    if [[ ! -f "$xray_config_path" ]]; then
+        info "配置文件不存在，创建新配置..."
+        mkdir -p "$(dirname "$xray_config_path")"
+        echo '{ "log": { "loglevel": "warning" }, "inbounds": [], "outbounds": [{ "protocol": "freedom", "tag": "direct" }, { "protocol": "blackhole", "tag": "blocked" }] }' > "$xray_config_path"
+    fi
+
+    # 2. 备份
+    cp "$xray_config_path" "${xray_config_path}.bak.$(date +%s)"
+
+    # 3. 使用 jq 智能追加到数组末尾
+    local temp_file; temp_file=$(mktemp)
+    jq --argjson new "$inbound_json" '
+        if .inbounds == null then .inbounds = [] else . end |
+        .inbounds += [$new]
+    ' "$xray_config_path" > "$temp_file" && mv "$temp_file" "$xray_config_path"
+    
+    chmod 644 "$xray_config_path"
+    success "配置已安全追加到: $xray_config_path"
+}
+
+# --- 自定义连接地址管理 ---
+set_connection_address() {
+    echo ""
+    echo "================================================="
+    echo "         自定义连接地址 (NAT/DDNS 模式)"
+    echo "================================================="
+    echo "说明: 如果您使用的是 NAT VPS 或拥有动态 IP 的机器，"
+    echo "请在此输入外部可访问的 IP 地址或 DDNS 域名。"
+    echo "脚本生成分享链接时将优先使用此地址。"
+    echo "-------------------------------------------------"
+    
+    if [[ -f "$address_file" ]]; then
+        local current_addr=$(cat "$address_file")
+        echo -e "当前已设置: ${cyan}${current_addr}${none}"
+    else
+        echo -e "当前状态: ${yellow}自动获取公网 IP${none}"
+    fi
+    echo ""
+    read -p "请输入新的连接地址 (留空并回车则恢复自动获取): " new_addr
+    
+    if [[ -z "$new_addr" ]]; then
+        rm -f "$address_file"
+        success "已恢复为自动获取公网 IP 模式。"
+    else
+        echo "$new_addr" > "$address_file"
+        success "连接地址已更新为: $new_addr"
+    fi
+}
+
+# --- 菜单操作函数 ---
+
+install_ss() {
+    info "开始配置 Shadowsocks..."
+    
+    local port
+    while true; do
+        read -p "$(echo -e "请输入端口 [1-65535] (默认: ${cyan}2022${none}): ")" port
+        [ -z "$port" ] && port=2022
+        if ! is_valid_port "$port"; then error "端口无效"; continue; fi
+        if is_port_in_use "$port"; then error "端口 $port 已被占用"; continue; fi
+        break
+    done
+
+    select_method_and_password
+
+    # 安装核心 & GeoData
+    if ! install_xray_core; then return 1; fi
+    install_geodata
+    
+    # 写入配置
+    append_ss_config "$port" "$SS_METHOD" "$SS_PASSWORD"
+    
+    # 设置并重启服务
+    setup_service
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    
+    success "安装配置完成！"
+    view_subscription_info "$port"
+}
+
+view_subscription_info() {
+    # 自动查找 SS 节点
+    if [[ ! -f "$xray_config_path" ]]; then error "配置不存在"; return; fi
+    
+    # 1. 扫描所有 SS 节点端口
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .port' "$xray_config_path")
+    
+    if [[ -z "$ports" ]]; then error "未找到 Shadowsocks 节点配置。"; return; fi
+
+    local target_port=""
+    local port_count=$(echo "$ports" | wc -l)
+
+    # 2. 智能选择逻辑
+    if [[ -n "$1" ]]; then
+        # 如果函数调用时传了端口，直接用
+        target_port=$1
+    elif [[ "$port_count" -eq 1 ]]; then
+        # 只有一个节点，自动选择
+        target_port=$(echo "$ports" | tr -d ' \n')
+    else
+        # 多个节点，列出并让用户选择
+        echo "发现多个 Shadowsocks 节点:"
+        for p in $ports; do echo " - 端口: $p"; done
+        echo ""
+        
+        while true; do
+            read -p "请输入要查看的端口: " input_p
+            if echo "$ports" | grep -q "^$input_p$"; then
+                target_port=$input_p
+                break
+            else
+                error "无效端口，请从列表中选择。"
+            fi
+        done
+    fi
+
+    # 3. 读取详细信息
+    local node_json
+    node_json=$(jq -r --argjson p "$target_port" '.inbounds[] | select(.port==$p and .protocol=="shadowsocks")' "$xray_config_path")
+    
+    if [[ -z "$node_json" ]]; then error "读取配置失败"; return; fi
+
+    local method=$(echo "$node_json" | jq -r '.settings.method')
+    local password=$(echo "$node_json" | jq -r '.settings.password')
+    local tag=$(echo "$node_json" | jq -r '.tag')
+    
+    # 4. 确定连接地址 (NAT/DDNS 支持)
+    local ip
+    if [[ -f "$address_file" && -s "$address_file" ]]; then
+        ip=$(cat "$address_file")
+        # 简单的验证，防止读取空文件
+        if [[ -z "$ip" ]]; then ip=$(get_public_ip); fi
+    else
+        ip=$(get_public_ip)
+    fi
+    
+    # 5. 生成链接 (SIP002)
+    local user_info="${method}:${password}"
+    local user_info_b64=$(echo -n "$user_info" | base64 -w 0)
+    
+    # URL 编码 tag
+    local tag_enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$tag'))")
+    local link="ss://${user_info_b64}@${ip}:${target_port}#${tag_enc}"
+
+    # 6. 独立文件保存
+    local save_file="/root/xray_ss_link_${target_port}.txt"
+
+    if [[ "$is_quiet" = true ]]; then
+        echo "$link"
+    else
+        echo "----------------------------------------------------------------"
+        echo -e "${green} --- Shadowsocks 配置信息 --- ${none}"
+        echo -e "${yellow} 协议: ${cyan}${method}${none}"
+        echo -e "${yellow} 地址: ${cyan}${ip}${none}"
+        echo -e "${yellow} 端口: ${cyan}${target_port}${none}"
+        echo -e "${yellow} 密码: ${cyan}${password}${none}"
+        echo -e "${yellow} 别名: ${cyan}${tag}${none}"
+        echo "----------------------------------------------------------------"
+        echo -e "${green} 分享链接 (已保存到 $save_file):${none}\n"
+        echo -e "${cyan}${link}${none}"
+        echo "----------------------------------------------------------------"
+        echo "$link" > "$save_file"
+    fi
+}
+
+update_xray() {
+    info "检查更新..."
+    install_xray_core
+    install_geodata
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "Xray 已更新"
+}
+
+restart_xray() {
+    info "正在重启 Xray..."
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "服务已重启"
+}
+
+uninstall_xray() {
+    read -p "确定卸载 Xray 吗？(删除程序文件，保留配置文件可选) [y/N]: " confirm
+    if [[ ! $confirm =~ ^[yY]$ ]]; then return; fi
+    
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+        systemctl stop xray || true
+        systemctl disable xray || true
+        rm -f /etc/systemd/system/xray.service
+        systemctl daemon-reload
+    else
+        rc-service xray stop || true
+        rc-update del xray default || true
+        rm -f /etc/init.d/xray
+    fi
+    
+    rm -f "$xray_binary_path"
+    read -p "是否删除配置文件和日志？[y/N]: " del_conf
+    if [[ $del_conf =~ ^[yY]$ ]]; then
+        rm -rf /usr/local/etc/xray /usr/local/share/xray /var/log/xray
+        rm -f /root/inbound_address.txt # 同时清理地址配置文件
+        success "Xray 及配置已完全卸载"
+    else
+        success "Xray 程序已卸载，配置保留"
+    fi
+}
+
+view_xray_log() {
+    info "显示日志... 按 Ctrl+C 停止查看"
+    trap 'echo -e "\n日志查看已停止。"' SIGINT
+    
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u xray -f --no-pager || true
+    elif [[ -d /var/log/xray ]]; then
+        (tail -n 200 -F /var/log/xray/*.log 2>/dev/null || tail -n 200 -F /var/log/*.log | grep -i xray) || true
+    else
+        error "无法找到日志"
+    fi
+    
+    trap - SIGINT
+    echo ""
+    read -n 1 -s -r -p "按任意键返回主菜单..." || true
+}
+
+modify_config() {
+    if [[ ! -f "$xray_config_path" ]]; then error "配置不存在"; return; fi
+    
+    # 1. 扫描所有 SS 端口
+    echo "当前 Shadowsocks 节点:"
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .port' "$xray_config_path")
+    
+    if [[ -z "$ports" ]]; then error "未找到 SS 节点"; return; fi
+    
+    for p in $ports; do echo " - 端口: $p"; done
+    echo ""
+    
+    local target_p
+    while true; do
+        read -p "请输入要修改的端口: " target_p
+        if echo "$ports" | grep -q "^$target_p$"; then break; else error "端口未找到"; fi
+    done
+    
+    info "注意：修改将删除旧端口配置并重新添加。"
+    info "请重新配置参数:"
+    
+    select_method_and_password
+    
+    # 删除旧配置 (精准删除)
+    local tmp; tmp=$(mktemp)
+    jq --argjson p "$target_p" 'del(.inbounds[] | select(.port == $p and .protocol=="shadowsocks"))' "$xray_config_path" > "$tmp" && mv "$tmp" "$xray_config_path"
+    
+    # 追加新配置
+    append_ss_config "$target_p" "$SS_METHOD" "$SS_PASSWORD"
+    
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "修改完成"
+    view_subscription_info "$target_p"
+}
+
+press_any_key_to_continue() {
+    echo ""
+    read -n 1 -s -r -p "按任意键返回主菜单..." || true
+}
+
+main_menu() {
+    while true; do
+        clear
+        echo -e "${cyan} Xray Shadowsocks 2022 管理脚本${none}"
+        echo "---------------------------------------------"
+        check_xray_status
+        echo -e "${xray_status_info}"
+        echo "---------------------------------------------"
+        printf "  ${green}%-2s${none} %-35s\n" "1." "新增/安装 Shadowsocks 节点"
+        printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray 核心"
+        printf "  ${yellow}%-2s${none} %-35s\n" "3." "重启 Xray 服务"
+        printf "  ${red}%-2s${none} %-35s\n" "4." "卸载 Xray"
+        printf "  ${magenta}%-2s${none} %-35s\n" "5." "查看日志"
+        printf "  ${cyan}%-2s${none} %-35s\n" "6." "修改/重置 SS 节点配置"
+        printf "  ${green}%-2s${none} %-35s\n" "7." "查看节点链接"
+        echo "---------------------------------------------"
+        printf "  ${magenta}%-2s${none} %-35s\n" "8." "设置连接地址 (NAT/DDNS)"
+        printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出"
+        echo "---------------------------------------------"
+        read -p "请输入选项 [0-8]: " choice
+
+        local needs_pause=true
+        case $choice in
+            1) install_ss ;;
+            2) update_xray ;;
+            3) restart_xray ;;
+            4) uninstall_xray ;;
+            5) view_xray_log; needs_pause=false ;;
+            6) modify_config ;;
+            7) view_subscription_info "" ;;
+            8) set_connection_address ;;
+            0) success "再见！"; exit 0 ;;
+            *) error "无效选项" ;;
+        esac
+
+        if [ "$needs_pause" = true ]; then
+            press_any_key_to_continue
+        fi
+    done
 }
 
 main() {
-  require_root
-  detect_os
-  ensure_packages
-  prompt_domain
-  prompt_port_until_free
-  install_xray
-  select_protocol
-  generate_key
-  backup_config_if_exists
-  generate_unique_tag      # <- 这里生成不会冲突的 tag
-  append_or_create_config
-  setup_service
-  detect_address
-  PW="$SS_KEY_B64" print_ss_uri
-  restart_service
-
-  info "完成。常用命令："
-  if command -v systemctl >/dev/null 2>&1; then
-    echo "  systemctl status xray      # 查看状态"
-    echo "  journalctl -u xray -e      # 查看日志"
-  else
-    echo "  rc-service xray status     # 查看状态（OpenRC）"
-    echo "  rc-service xray restart    # 重启服务（OpenRC）"
-  fi
+    pre_check
+    if [[ $# -gt 0 && "$1" == "install" ]]; then
+        # 简易命令行模式
+        install_ss
+    else
+        main_menu
+    fi
 }
 
 main "$@"
