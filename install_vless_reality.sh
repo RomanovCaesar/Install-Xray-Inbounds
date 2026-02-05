@@ -456,16 +456,30 @@ uninstall_xray() {
 
 view_xray_log() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装，无法查看日志。" && return; fi
-    info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"
+    
+    info "正在显示 Xray 实时日志... 按 Ctrl+C 停止查看。"
+
+    # 捕获 SIGINT (Ctrl+C) 信号，打印换行
+    trap 'echo -e "\n日志查看已停止。"' SIGINT
+
+    # 执行日志命令
     if command -v journalctl >/dev/null 2>&1; then
-        journalctl -u xray -f --no-pager
+        journalctl -u xray -f --no-pager || true
     elif command -v logread >/dev/null 2>&1; then
-        logread -f | grep -i xray
+        (logread -f | grep -i xray) || true
     elif [[ -d /var/log/xray ]]; then
-        tail -n 200 -F /var/log/xray/*.log 2>/dev/null || tail -n 200 -F /var/log/*.log | grep -i xray
+        (tail -n 200 -F /var/log/xray/*.log 2>/dev/null || tail -n 200 -F /var/log/*.log | grep -i xray) || true
     else
         error "无法找到日志来源，请检查系统日志或 /var/log/xray。"
     fi
+
+    # 解除捕获，恢复 Ctrl+C 的默认行为
+    # 在主菜单或其他地方按下 Ctrl+C 依然可以正常退出脚本
+    trap - SIGINT
+
+    # 手动添加返回提示
+    echo ""
+    read -n 1 -s -r -p "按任意键返回主菜单..." || true
 }
 
 modify_config() {
