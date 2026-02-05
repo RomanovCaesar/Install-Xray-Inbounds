@@ -88,7 +88,7 @@ pull_and_run() {
     fi
 }
 
-# --- 功能 7: 更新自身 ---
+# --- 功能 8: 更新自身 ---
 update_self() {
     info "正在检查更新..."
     local download_url="${BASE_URL}/xray_manager.sh" # 假设你在仓库里把这个脚本命名为 xray_manager.sh
@@ -115,8 +115,9 @@ show_menu() {
     echo -e "  ${GREEN}4.${PLAIN} 安装/管理 VLESS Encryption (Post-Quantum)"
     echo -e "  ${YELLOW}5.${PLAIN} Xray 服务端分流配置 (Routing)"
     echo -e "  ${RED}6.${PLAIN} 卸载 Xray 及相关文件"
+    echo -e "  ${CYAN}7.${PLAIN} 还原 Xray 配置 (Restore)"
     echo "-------------------------------------------------"
-    echo -e "  ${CYAN}7.${PLAIN} 更新此管理脚本"
+    echo -e "  ${CYAN}8.${PLAIN} 更新此管理脚本"
     echo -e "  ${CYAN}0.${PLAIN} 退出脚本"
     echo -e "${CYAN}=================================================${PLAIN}"
     
@@ -129,7 +130,8 @@ show_menu() {
         4) pull_and_run "install_vless_encryption.sh" "执行 VLESS Encryption 安装向导" ;;
         5) pull_and_run "xray_routing.sh" "进入分流配置工具" ;;
         6) pull_and_run "uninstall_xray.sh" "执行卸载程序" ;;
-        7) update_self ;;
+        7) pull_and_run "xray_restore.sh" "执行配置还原工具" ;;
+        8) update_self ;;
         0) echo -e "${GREEN}感谢使用此脚本，再见！${PLAIN}"; exit 0 ;;
         *) echo -e "${RED}无效输入，请重新选择。${PLAIN}"; sleep 1 ;;
     esac
