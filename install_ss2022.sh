@@ -3,13 +3,14 @@
 # ==============================================================================
 # Xray Shadowsocks 2022 一键安装管理脚本
 # 架构重构版：模仿 VLESS-Reality 脚本体验，支持多协议共存
-# 版本: V-SS-Reborn-1.1 (NAT/DDNS 增强版)
+# 版本: V-SS-Reborn-1.2 (新增节点删除功能)
 # 功能:
 # - 安装/管理 Shadowsocks (Legacy & 2022)
 # - 智能追加配置 (不覆盖 VLESS 节点)
 # - 多端口/多节点管理
 # - 自动配置 Systemd/OpenRC (Root 用户)
-# - [新增] 支持自定义连接地址 (用于 NAT/DDNS 场景)
+# - 支持自定义连接地址 (用于 NAT/DDNS 场景)
+# - 精准删除指定 SS 节点
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -373,8 +374,62 @@ set_connection_address() {
     fi
 }
 
-# --- 菜单操作函数 ---
+# --- 删除 SS 节点 ---
+delete_ss_node() {
+    if [[ ! -f "$xray_config_path" ]]; then error "配置不存在"; return; fi
 
+    # 1. 扫描所有 SS 端口
+    echo "当前已安装的 Shadowsocks 节点:"
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.protocol=="shadowsocks") | .port' "$xray_config_path")
+
+    if [[ -z "$ports" ]]; then
+        error "未找到任何 Shadowsocks 节点，无需删除。"
+        return
+    fi
+
+    for p in $ports; do echo " - 端口: $p"; done
+    echo ""
+
+    local target_p
+    while true; do
+        read -p "请输入要删除的端口 (输入上述端口之一): " target_p
+        # 验证端口是否属于 SS 节点 (防止误删其他类型节点)
+        if echo "$ports" | grep -q "^$target_p$"; then
+            break
+        else
+            error "端口无效或该端口不是 Shadowsocks 节点，请重新输入。"
+        fi
+    done
+
+    read -p "确定要永久删除端口 $target_p 的 Shadowsocks 节点吗？[y/N]: " confirm
+    if [[ ! $confirm =~ ^[yY]$ ]]; then
+        info "操作已取消。"
+        return
+    fi
+
+    info "正在删除节点..."
+
+    # 备份
+    cp "$xray_config_path" "${xray_config_path}.bak.del.$(date +%s)"
+
+    # 删除配置 (精准删除: 匹配端口 AND 协议是 shadowsocks)
+    local tmp; tmp=$(mktemp)
+    jq --argjson p "$target_p" 'del(.inbounds[] | select(.port == $p and .protocol=="shadowsocks"))' "$xray_config_path" > "$tmp" && mv "$tmp" "$xray_config_path"
+
+    # 删除本地连接文件
+    local link_file="/root/xray_ss_link_${target_p}.txt"
+    if [[ -f "$link_file" ]]; then
+        rm -f "$link_file"
+        info "已删除本地连接文件: $link_file"
+    fi
+
+    # 重启服务
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "Shadowsocks 节点 (端口 $target_p) 已删除。"
+}
+
+# --- 菜单操作函数 ---
 install_ss() {
     info "开始配置 Shadowsocks..."
     
@@ -603,11 +658,12 @@ main_menu() {
         printf "  ${magenta}%-2s${none} %-35s\n" "5." "查看日志"
         printf "  ${cyan}%-2s${none} %-35s\n" "6." "修改/重置 SS 节点配置"
         printf "  ${green}%-2s${none} %-35s\n" "7." "查看节点链接"
+        printf "  ${red}%-2s${none} %-35s\n" "8." "删除 Shadowsocks 节点"
         echo "---------------------------------------------"
-        printf "  ${magenta}%-2s${none} %-35s\n" "8." "设置连接地址 (NAT/DDNS)"
+        printf "  ${magenta}%-2s${none} %-35s\n" "9." "设置连接地址 (NAT/DDNS)"
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出"
         echo "---------------------------------------------"
-        read -p "请输入选项 [0-8]: " choice
+        read -p "请输入选项 [0-9]: " choice
 
         local needs_pause=true
         case $choice in
@@ -618,7 +674,8 @@ main_menu() {
             5) view_xray_log; needs_pause=false ;;
             6) modify_config ;;
             7) view_subscription_info "" ;;
-            8) set_connection_address ;;
+            8) delete_ss_node ;;
+            9) set_connection_address ;;
             0) success "再见！"; exit 0 ;;
             *) error "无效选项" ;;
         esac
