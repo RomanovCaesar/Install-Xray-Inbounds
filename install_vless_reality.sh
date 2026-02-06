@@ -4,8 +4,8 @@
 # Xray VLESS-Reality 一键安装管理脚本
 # 自从之前Fork之后，本脚本已经过多次修改重构，所有函数都改写了
 # 就相当于自研的脚本了，感谢ChatGPT和Gemini
-# 版本: V-Reborn-Caesar-3.3 (NAT/DDNS 增强版)
-# 更新日志: 新增自定义连接地址支持
+# 版本: V-Reborn-Caesar-3.4 (节点删除增强版)
+# 更新日志: 新增精准删除 Reality 节点功能
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -767,6 +767,61 @@ run_install() {
     view_subscription_info
 }
 
+# --- 删除 Reality 节点 ---
+delete_reality_node() {
+    if [[ ! -f "$xray_config_path" ]]; then error "配置不存在"; return; fi
+
+    # 1. 扫描所有 Reality 端口
+    echo "当前已安装的 VLESS-Reality 节点:"
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.streamSettings.security == "reality") | .port' "$xray_config_path")
+
+    if [[ -z "$ports" ]]; then
+        error "未找到任何 VLESS-Reality 节点，无需删除。"
+        return
+    fi
+
+    for p in $ports; do echo " - 端口: $p"; done
+    echo ""
+
+    local target_p
+    while true; do
+        read -p "请输入要删除的端口 (输入上述端口之一): " target_p
+        # 验证端口是否属于 Reality 节点
+        if echo "$ports" | grep -q "^$target_p$"; then
+            break
+        else
+            error "端口无效或该端口不是 Reality 节点，请重新输入。"
+        fi
+    done
+
+    read -p "确定要永久删除端口 $target_p 的 Reality 节点吗？[y/N]: " confirm
+    if [[ ! $confirm =~ ^[yY]$ ]]; then
+        info "操作已取消。"
+        return
+    fi
+
+    info "正在删除节点..."
+
+    # 备份
+    cp "$xray_config_path" "${xray_config_path}.bak.del.$(date +%s)"
+
+    # 删除配置 (精准删除)
+    local tmp; tmp=$(mktemp)
+    jq --argjson p "$target_p" 'del(.inbounds[] | select(.port == $p and .streamSettings.security == "reality"))' "$xray_config_path" > "$tmp" && mv "$tmp" "$xray_config_path"
+
+    # 删除本地连接文件
+    local link_file=~/xray_vless_reality_link_${target_p}.txt
+    if [[ -f "$link_file" ]]; then
+        rm -f "$link_file"
+        info "已删除本地连接文件: $link_file"
+    fi
+
+    # 重启服务
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "VLESS-Reality 节点 (端口 $target_p) 已删除。"
+}
+
 press_any_key_to_continue() {
     echo ""
     read -n 1 -s -r -p "按任意键返回主菜单..." || true
@@ -787,11 +842,12 @@ main_menu() {
         printf "  ${magenta}%-2s${none} %-35s\n" "5." "查看 Xray 日志"
         printf "  ${cyan}%-2s${none} %-35s\n" "6." "修改节点配置"
         printf "  ${green}%-2s${none} %-35s\n" "7." "查看订阅信息"
+        printf "  ${red}%-2s${none} %-35s\n" "8." "删除 VLESS-Reality 节点"
         echo "---------------------------------------------"
-        printf "  ${magenta}%-2s${none} %-35s\n" "8." "设置连接地址 (NAT/DDNS)"
+        printf "  ${magenta}%-2s${none} %-35s\n" "9." "设置连接地址 (NAT/DDNS)"
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
         echo "---------------------------------------------"
-        read -p "请输入选项 [0-8]: " choice
+        read -p "请输入选项 [0-9]: " choice
 
         local needs_pause=true
         case $choice in
@@ -802,9 +858,10 @@ main_menu() {
             5) view_xray_log; needs_pause=false ;;
             6) modify_config ;;
             7) view_subscription_info ;;
-            8) set_connection_address ;;
+            8) delete_reality_node ;;
+            9) set_connection_address ;;
             0) success "感谢使用！"; exit 0 ;;
-            *) error "无效选项，请输入 0-8 之间的数字。" ;;
+            *) error "无效选项" ;;
         esac
 
         if [ "$needs_pause" = true ]; then
