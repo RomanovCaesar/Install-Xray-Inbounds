@@ -21,7 +21,7 @@ vless encryption (post-quantum):
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_vless_encryption.sh -o install_vless_encryption.sh && chmod +x install_vless_encryption.sh && sudo ./install_vless_encryption.sh
 ```
 
-vless vision reality (Fork from [yahuisme/xray-vless-reality](https://github.com/yahuisme/xray-vless-reality)):
+vless vision reality:
 ```bash
 curl -L https://raw.githubusercontent.com/RomanovCaesar/Install-Xray-Inbounds/main/install_vless_reality.sh -o install_vless_reality.sh && chmod +x install_vless_reality.sh && sudo ./install_vless_reality.sh
 ```
