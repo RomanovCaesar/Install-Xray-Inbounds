@@ -264,16 +264,16 @@ check_xray_status() {
 }
 
 # --- 核心 SS 配置逻辑 ---
-
 select_method_and_password() {
     echo ""
     echo "请选择 Shadowsocks 加密协议:"
-    echo "  ${green}1.${none} 2022-blake3-aes-128-gcm   (推荐, 16字节密钥)"
-    echo "  ${green}2.${none} 2022-blake3-aes-256-gcm   (推荐, 32字节密钥)"
-    echo "  ${green}3.${none} 2022-blake3-chacha20-poly1305 (推荐, 32字节密钥)"
-    echo "  ${yellow}4.${none} aes-128-gcm   (传统, 16字节密钥)"
-    echo "  ${yellow}5.${none} aes-256-gcm   (传统, 32字节密钥)"
-    echo "  ${yellow}6.${none} chacha20-ietf-poly1305 (传统, 32字节密钥)"
+    echo -e "  ${green}1.${none} 2022-blake3-aes-128-gcm   (推荐, 16字节密钥)"
+    echo -e "  ${green}2.${none} 2022-blake3-aes-256-gcm   (推荐, 32字节密钥)"
+    echo -e "  ${green}3.${none} 2022-blake3-chacha20-poly1305 (推荐, 32字节密钥)"
+    echo -e "  ${yellow}4.${none} aes-128-gcm   (传统, 16字节密钥)"
+    echo -e "  ${yellow}5.${none} aes-256-gcm   (传统, 32字节密钥)"
+    echo -e "  ${yellow}6.${none} chacha20-ietf-poly1305 (传统, 32字节密钥)"
+    
     read -p "请输入选项 [1-6] (默认 2): " method_choice
     [ -z "$method_choice" ] && method_choice=2
 
@@ -289,7 +289,9 @@ select_method_and_password() {
     esac
 
     echo ""
-    read -p "$(echo -e "请输入密码 (留空生成随机 ${key_len} 字节密码): ")" user_pass
+    echo -ne "请输入密码 (留空生成随机 ${key_len} 字节密码): "
+    read user_pass
+    
     if [[ -z "$user_pass" ]]; then
         SS_PASSWORD=$(openssl rand -base64 $key_len | tr -d '\n')
         info "已自动生成密码: ${cyan}${SS_PASSWORD}${none}"
