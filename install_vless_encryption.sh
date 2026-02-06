@@ -3,13 +3,14 @@
 # ==============================================================================
 # Xray VLESS Encryption (Post-Quantum) 一键安装管理脚本
 # 架构重构版：模仿 Reality 脚本体验，支持多协议共存
-# 版本: V-PQ-Reborn-1.0
+# 版本: V-PQ-Reborn-1.1 (新增节点删除功能)
 # 功能:
 # - 安装/管理 VLESS Encryption (ML-KEM-768)
 # - 自动生成并替换抗量子密钥 (.native. -> .random.)
 # - 智能追加配置 (不覆盖 Reality/SS 节点)
 # - 多端口/多节点管理
 # - 支持自定义连接地址 (NAT/DDNS)
+# - 精准删除指定 VLESS PQ 节点
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -264,7 +265,6 @@ check_xray_status() {
 }
 
 # --- 核心 VLESS Encryption 逻辑 ---
-
 generate_vless_tokens() {
     info "生成 VLESS Encryption (ML-KEM-768) 密钥..."
     
@@ -368,8 +368,62 @@ set_connection_address() {
     fi
 }
 
-# --- 菜单操作函数 ---
+# --- 删除 VLESS PQ 节点 ---
+delete_vless_pq_node() {
+    if [[ ! -f "$xray_config_path" ]]; then error "配置不存在"; return; fi
 
+    # 1. 扫描所有 VLESS PQ 端口
+    echo "当前已安装的 VLESS Encryption (Post-Quantum) 节点:"
+    local ports
+    ports=$(jq -r '.inbounds[] | select(.protocol=="vless" and (.settings.selectedAuth | tostring | contains("Post-Quantum"))) | .port' "$xray_config_path")
+
+    if [[ -z "$ports" ]]; then
+        error "未找到任何 VLESS Encryption 节点，无需删除。"
+        return
+    fi
+
+    for p in $ports; do echo " - 端口: $p"; done
+    echo ""
+
+    local target_p
+    while true; do
+        read -p "请输入要删除的端口 (输入上述端口之一): " target_p
+        # 验证端口是否属于 VLESS PQ 节点
+        if echo "$ports" | grep -q "^$target_p$"; then
+            break
+        else
+            error "端口无效或该端口不是 VLESS Encryption 节点，请重新输入。"
+        fi
+    done
+
+    read -p "确定要永久删除端口 $target_p 的节点吗？[y/N]: " confirm
+    if [[ ! $confirm =~ ^[yY]$ ]]; then
+        info "操作已取消。"
+        return
+    fi
+
+    info "正在删除节点..."
+
+    # 备份
+    cp "$xray_config_path" "${xray_config_path}.bak.del.$(date +%s)"
+
+    # 删除配置 (精准删除)
+    local tmp; tmp=$(mktemp)
+    jq --argjson p "$target_p" 'del(.inbounds[] | select(.port == $p))' "$xray_config_path" > "$tmp" && mv "$tmp" "$xray_config_path"
+
+    # 删除本地连接文件
+    local link_file="/root/xray_vless_encryption_link_${target_p}.txt"
+    if [[ -f "$link_file" ]]; then
+        rm -f "$link_file"
+        info "已删除本地连接文件: $link_file"
+    fi
+
+    # 重启服务
+    if [[ "$INIT_SYSTEM" == "systemd" ]]; then systemctl restart xray; else rc-service xray restart; fi
+    success "VLESS Encryption 节点 (端口 $target_p) 已删除。"
+}
+
+# --- 菜单操作函数 ---
 install_vless_pq() {
     info "开始配置 VLESS Encryption (Post-Quantum)..."
     
@@ -618,11 +672,12 @@ main_menu() {
         printf "  ${magenta}%-2s${none} %-35s\n" "5." "查看日志"
         printf "  ${cyan}%-2s${none} %-35s\n" "6." "修改/重置节点配置"
         printf "  ${green}%-2s${none} %-35s\n" "7." "查看节点链接"
+        printf "  ${red}%-2s${none} %-35s\n" "8." "删除 VLESS PQ 节点"
         echo "---------------------------------------------"
-        printf "  ${magenta}%-2s${none} %-35s\n" "8." "设置连接地址 (NAT/DDNS)"
+        printf "  ${magenta}%-2s${none} %-35s\n" "9." "设置连接地址 (NAT/DDNS)"
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出"
         echo "---------------------------------------------"
-        read -p "请输入选项 [0-8]: " choice
+        read -p "请输入选项 [0-9]: " choice
 
         local needs_pause=true
         case $choice in
@@ -633,7 +688,8 @@ main_menu() {
             5) view_xray_log; needs_pause=false ;;
             6) modify_config ;;
             7) view_subscription_info "" ;;
-            8) set_connection_address ;;
+            8) delete_vless_pq_node ;;
+            9) set_connection_address ;;
             0) success "再见！"; exit 0 ;;
             *) error "无效选项" ;;
         esac
