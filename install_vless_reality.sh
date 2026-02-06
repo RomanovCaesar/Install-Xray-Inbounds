@@ -2,9 +2,9 @@
 
 # ==============================================================================
 # Xray VLESS-Reality 一键安装管理脚本
-# 此脚本Fork自https://github.com/yahuisme/xray-vless-reality, 感谢@yahuisme
-# 自从Fork之后，本脚本已经过大量修改重构，感谢ChatGPT和Gemini
-# 版本: V-Fork-Caesar-3.3 (NAT/DDNS 增强版)
+# 自从之前Fork之后，本脚本已经过多次修改重构，所有函数都改写了
+# 就相当于自研的脚本了，感谢ChatGPT和Gemini
+# 版本: V-Reborn-Caesar-3.3 (NAT/DDNS 增强版)
 # 更新日志: 新增自定义连接地址支持
 # ==============================================================================
 
