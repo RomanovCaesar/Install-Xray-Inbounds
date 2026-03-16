@@ -519,10 +519,20 @@ view_subscription_info() {
     # 5. 生成链接 (SIP002)
     local user_info="${method}:${password}"
     local user_info_b64=$(echo -n "$user_info" | base64 -w 0)
-    
-    # URL 编码 tag
-    local tag_enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$tag'))")
-    local link="ss://${user_info_b64}@${ip}:${target_port}#${tag_enc}"
+
+    local ipinfo_json country org link_name
+    ipinfo_json=$(curl -sf --max-time 5 https://ipinfo.io 2>/dev/null)
+    if [[ -n "$ipinfo_json" ]]; then
+        country=$(echo "$ipinfo_json" | grep '"country"' | sed 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+        org=$(echo "$ipinfo_json" | grep '"org"' | sed 's/.*"org"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    fi
+    if [[ -n "$country" && -n "$org" ]]; then
+        link_name="${country} - ${org}"
+    else
+        link_name="$tag"
+    fi
+    local link_name_encoded=$(echo "$link_name" | sed 's/ /%20/g')
+    local link="ss://${user_info_b64}@${ip}:${target_port}#${link_name_encoded}"
 
     # 6. 独立文件保存
     local save_file="/root/xray_ss_link_${target_port}.txt"
