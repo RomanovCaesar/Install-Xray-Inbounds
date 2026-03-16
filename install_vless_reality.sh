@@ -642,7 +642,17 @@ view_subscription_info() {
 
     # URL 编码处理
     local spiderx_encoded=$(echo "$spiderx" | sed 's/\//%2F/g')
-    local link_name="$(hostname)-${target_port}"
+    local ipinfo_json country org link_name
+    ipinfo_json=$(curl -sf --max-time 5 https://ipinfo.io 2>/dev/null)
+    if [[ -n "$ipinfo_json" ]]; then
+        country=$(echo "$ipinfo_json" | grep '"country"' | sed 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+        org=$(echo "$ipinfo_json" | grep '"org"' | sed 's/.*"org"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    fi
+    if [[ -n "$country" && -n "$org" ]]; then
+        link_name="${country} - ${org}"
+    else
+        link_name="$(hostname)-${target_port}"
+    fi
     local link_name_encoded=$(echo "$link_name" | sed 's/ /%20/g')
     
     local vless_url="vless://${uuid}@${display_ip}:${target_port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}&spx=${spiderx_encoded}#${link_name_encoded}"
