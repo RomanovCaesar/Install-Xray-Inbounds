@@ -758,8 +758,8 @@ run_install() {
 
     info "正在生成 Reality 密钥对..."
     local key_pair=$($xray_binary_path x25519)
-    local private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
-    local public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
+    local private_key=$(echo "$key_pair" | grep -i 'private' | awk '{print $NF}')
+    local public_key=$(echo "$key_pair" | grep -iE 'password|public' | awk '{print $NF}')
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常。"
         exit 1
