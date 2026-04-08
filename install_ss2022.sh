@@ -658,6 +658,11 @@ main_menu() {
         clear
         echo -e "${cyan} Xray Shadowsocks 2022 管理脚本${none}"
         echo "---------------------------------------------"
+        echo -e "${red} 如果您是在uzumaru购买的产品，并且该产品${none}"
+        echo -e "${red} 是用IDC入口IP或者是DDNS域名连接的${none}"
+        echo -e "${red} 请先使用功能9，填入uzumaru网站面板上显示的连接IP或DDNS域名${none}"
+        echo -e "${red} 避免创建节点后因使用错误连接地址而不通。${none}"
+        echo "---------------------------------------------"
         check_xray_status
         echo -e "${xray_status_info}"
         echo "---------------------------------------------"
