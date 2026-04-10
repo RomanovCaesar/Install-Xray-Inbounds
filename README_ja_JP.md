@@ -1,4 +1,4 @@
-[中文](/README.md) | [English](/README_en_US.md) | [日本語](/README_ja_JP.md) 
+[中文](/README.md) | [English](/README_en_US.md) | [日本語](/README_ja_JP.md) | [Русский](/README_ru_RU.md) 
 
 # Caesar 特製 Xray ワンクリックインストール＆管理ツールボックス (Install-Xray-Inbounds)
 
