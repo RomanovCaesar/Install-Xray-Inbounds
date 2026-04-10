@@ -1,4 +1,4 @@
-[中文](/README.md) | [English](/README_en_US.md) 
+[中文](/README.md) | [English](/README_en_US.md) | [日本語](/README_ja_JP.md) 
 
 # Caesar 蜜汁 Xray 一键安装与管理工具箱 (Install-Xray-Inbounds)
 
