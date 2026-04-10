@@ -1,4 +1,4 @@
-[中文](/README.md) | [English](/README_en_US.md) 
+[中文](/README.md) | [English](/README_en_US.md) | [日本語](/README_ja_JP.md) 
 
 # Caesar's Special Xray One-Click Installation & Management Toolkit (Install-Xray-Inbounds)
 
