@@ -1,9 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# Caesar 蜜汁 xray 服务端分流脚本 v2.0
+# Caesar 蜜汁 xray 服务端分流脚本 v2.1
 # 适配环境：Debian/Ubuntu/Alpine
 # 依赖：jq, curl, python3, openssl
 # 功能：安装Geo数据、添加Outbounds(Socks/SS/VLESS)、添加Routing、查询配置
+# 更新：支持无 IP/Domain 条件的纯 Inbound 链式代理转发规则
 # ==============================================================================
 
 # --- 全局设置 ---
@@ -479,11 +480,13 @@ add_routing() {
     read -rp "1) IP/CIDR (如 8.8.8.8, 192.168.1.0/24, geoip:cn): " ip_cond_raw
     read -rp "2) Domain/GeoSite (如 google.com, geosite:cn): " domain_cond_raw
 
-    if [[ -z "$ip_cond_raw" && -z "$domain_cond_raw" ]]; then
-        die "必须至少输入一个条件 (IP 或 Domain)。"
+    # --- 取消了强制校验，支持无 IP/Domain 条件的链式转发 ---
+    if [[ -z "$ip_cond_raw" && -z "$domain_cond_raw" && -z "$in_tags_raw" ]]; then
+        warn "警告：你没有输入 Inbound、IP 或 Domain 条件！这将创建一条匹配所有流量的默认转发规则。"
+    elif [[ -z "$ip_cond_raw" && -z "$domain_cond_raw" ]]; then
+        info "未输入 IP 或 Domain 条件，将创建基于 Inbound 的全量代理转发规则（链式代理）。"
     fi
 
-    # --- 修复逻辑开始：将逗号分隔字符串转为 JSON 数组 ---
     local ip_json="null"
     if [[ -n "$ip_cond_raw" ]]; then
         ip_json=$(echo "$ip_cond_raw" | jq -R 'split(",") | map(gsub(" "; "")) | map(select(length > 0))')
@@ -493,7 +496,6 @@ add_routing() {
     if [[ -n "$domain_cond_raw" ]]; then
         domain_json=$(echo "$domain_cond_raw" | jq -R 'split(",") | map(gsub(" "; "")) | map(select(length > 0))')
     fi
-    # --- 修复逻辑结束 ---
 
     # 3. Select Outbound
     echo "当前 Outbounds:"
@@ -593,7 +595,7 @@ update_script() {
 show_menu() {
     clear
     echo "================================================="
-    echo "       Caesar 蜜汁 xray 服务端分流脚本 v2.0       "
+    echo "       Caesar 蜜汁 xray 服务端分流脚本 v2.1       "
     echo "================================================="
     echo
     echo "  1. 安装 Geo 文件 (配置每日自动更新)"
