@@ -75,22 +75,16 @@ install_xray_core() {
         *) error "不支持的 CPU 架构: $machine"; return 1 ;;
     esac
 
-    local api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-    info "获取 Xray 最新版本信息..."
-    local tag
-    tag="$(curl -fsSL "$api" | grep -oE '"tag_name":\s*"[^"]+"' | head -n1 | cut -d'"' -f4)" || true
-    
-    local version_str="${tag:-latest}"
+    local tag="v26.3.27"
+    local version_str="$tag"
     info "目标版本: $version_str"
 
     local tmpdir; tmpdir="$(mktemp -d)"
     local zipname="Xray-linux-${arch}.zip"
-    local url_main="https://github.com/XTLS/Xray-core/releases/latest/download/${zipname}"
     local url_tag="https://github.com/XTLS/Xray-core/releases/download/${tag}/${zipname}"
 
     info "正在下载 Xray ($zipname)..."
-    if [[ -n "${tag:-}" ]] && curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :;
-    elif curl -fL "$url_main" -o "$tmpdir/xray.zip"; then :;
+    if curl -fL "$url_tag" -o "$tmpdir/xray.zip"; then :;
     else 
         rm -rf "$tmpdir"
         error "下载 Xray 失败"
