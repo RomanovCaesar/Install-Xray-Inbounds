@@ -1,5 +1,126 @@
 #!/bin/bash
 
+# --- 启动前提示：优先推荐 Mihomo 实现 ---
+offer_mihomo_alternative() {
+    local mihomo_script="$1"
+    shift
+    local red='\033[1;31m' yellow='\033[1;33m' cyan='\033[1;36m' green='\033[1;32m' plain='\033[0m'
+    local answer="" temp_file="" download_url="" saved_preference=""
+    local preference_file="/etc/xray-inbounds-core-preference"
+    local is_uzumaru=false
+
+    if [[ "${XRAY_SKIP_MIHOMO_PROMPT_ONCE:-0}" == "1" ]]; then
+        unset XRAY_SKIP_MIHOMO_PROMPT_ONCE
+        return 0
+    fi
+
+    [[ -d /etc/uzmaru ]] && is_uzumaru=true
+
+    if [[ -r "$preference_file" ]]; then
+        IFS= read -r saved_preference <"$preference_file" || saved_preference=""
+        case "$saved_preference" in
+            mihomo)
+                printf '%b已读取保存的内核偏好：Mihomo，将自动运行对应脚本。%b\n' "$green" "$plain"
+                answer="y"
+                ;;
+            xray)
+                if [[ "$is_uzumaru" == false ]]; then
+                    printf '%b已读取保存的内核偏好：Xray，将继续运行当前脚本。%b\n' "$yellow" "$plain"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+
+    if [[ "$answer" != "y" ]]; then
+        printf '\n%b============================================================%b\n' "$yellow" "$plain"
+        printf '%b  Xray 内核风险提示%b\n' "$red" "$plain"
+        printf '%b============================================================%b\n' "$yellow" "$plain"
+        printf '%bXray 内核在部分环境下可能出现内存占用持续增长、OOM，%b\n' "$yellow" "$plain"
+        printf '%b以及 TCP 连接数异常爆炸等问题；在低配置、低性能机器，%b\n' "$yellow" "$plain"
+        printf '%b尤其是 Uzumaru 等平台的 NAT 容器上，风险会更加明显。%b\n\n' "$yellow" "$plain"
+        printf '建议改用资源占用更低的 Mihomo 脚本项目：\n'
+        printf '%bhttps://github.com/RomanovCaesar/Install-Mihomo-Inbounds%b\n\n' "$cyan" "$plain"
+        if [[ "$is_uzumaru" == true ]]; then
+            printf '%b已检测到 /etc/uzmaru：选择 Xray 仅本次有效，下次仍会询问。%b\n\n' "$red" "$plain"
+        else
+            printf '%b本次选择将保存在此机器上，供这五个 Xray 脚本共同使用。%b\n\n' "$green" "$plain"
+        fi
+    fi
+
+    while true; do
+        if [[ "$answer" != "y" ]]; then
+            printf '%b是否改用 Mihomo 对应脚本？[Y/n]：%b' "$green" "$plain"
+            if [[ -r /dev/tty ]]; then
+                IFS= read -r answer </dev/tty 2>/dev/null || answer=""
+            else
+                IFS= read -r answer || answer=""
+            fi
+        fi
+
+        case "$answer" in
+            ""|y|Y|yes|YES|Yes)
+                if [[ "$saved_preference" != "mihomo" ]]; then
+                    if printf '%s\n' "mihomo" >"$preference_file"; then
+                        printf '%b已保存 Mihomo 偏好；以后将自动运行对应的 Mihomo 脚本。%b\n' "$green" "$plain"
+                    else
+                        printf '%b[警告] 无法写入偏好文件 %s，本次仍将运行 Mihomo。%b\n' "$yellow" "$preference_file" "$plain" >&2
+                    fi
+                fi
+                download_url="https://raw.githubusercontent.com/RomanovCaesar/Install-Mihomo-Inbounds/main/${mihomo_script}"
+                temp_file="$(mktemp "/tmp/${mihomo_script}.XXXXXX")" || {
+                    printf '%b[错误] 无法创建临时文件。%b\n' "$red" "$plain" >&2
+                    exit 1
+                }
+                trap 'rm -f -- "$temp_file"' EXIT
+
+                printf '%b正在下载并执行 Mihomo 脚本：%s%b\n' "$green" "$mihomo_script" "$plain"
+                if command -v curl >/dev/null 2>&1; then
+                    if ! curl -fsSL "$download_url" -o "$temp_file"; then
+                        printf '%b[错误] Mihomo 脚本下载失败：%s%b\n' "$red" "$download_url" "$plain" >&2
+                        exit 1
+                    fi
+                elif command -v wget >/dev/null 2>&1; then
+                    if ! wget -qO "$temp_file" "$download_url"; then
+                        printf '%b[错误] Mihomo 脚本下载失败：%s%b\n' "$red" "$download_url" "$plain" >&2
+                        exit 1
+                    fi
+                else
+                    printf '%b[错误] 未找到 curl 或 wget，无法下载 Mihomo 脚本。%b\n' "$red" "$plain" >&2
+                    exit 1
+                fi
+
+                if [[ ! -s "$temp_file" ]]; then
+                    printf '%b[错误] Mihomo 脚本下载失败或内容为空。%b\n' "$red" "$plain" >&2
+                    exit 1
+                fi
+
+                bash "$temp_file" "$@"
+                local mihomo_status=$?
+                exit "$mihomo_status"
+                ;;
+            n|N|no|NO|No)
+                if [[ "$is_uzumaru" == true ]]; then
+                    rm -f -- "$preference_file" 2>/dev/null || true
+                    printf '%b已选择继续运行 Xray 脚本；Uzumaru 机器不会保存此选择。%b\n\n' "$yellow" "$plain"
+                else
+                    if printf '%s\n' "xray" >"$preference_file"; then
+                        printf '%b已保存 Xray 偏好；以后将直接运行 Xray 脚本。%b\n\n' "$yellow" "$plain"
+                    else
+                        printf '%b[警告] 无法写入偏好文件 %s，本次继续运行 Xray。%b\n\n' "$yellow" "$preference_file" "$plain" >&2
+                    fi
+                fi
+                return 0
+                ;;
+            *)
+                printf '%b请输入 y、n，或直接按 Enter 使用默认选项 Y。%b\n' "$red" "$plain"
+                ;;
+        esac
+    done
+}
+
+offer_mihomo_alternative "install_vless_reality.sh" "$@"
+
 # ==============================================================================
 # Xray VLESS-Reality 一键安装管理脚本
 # 自从之前Fork之后，本脚本已经过多次修改重构，所有函数都改写了
