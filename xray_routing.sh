@@ -102,7 +102,7 @@ offer_mihomo_alternative() {
             n|N|no|NO|No)
                 if [[ "$is_uzumaru" == true ]]; then
                     rm -f -- "$preference_file" 2>/dev/null || true
-                    printf '%b已选择继续运行 Xray 脚本；Uzumaru 机器不会保存此选择。%b\n\n' "$yellow" "$plain"
+                    printf '%b已选择继续运行 Xray 脚本。%b\n\n' "$yellow" "$plain"
                 else
                     if printf '%s\n' "xray" >"$preference_file"; then
                         printf '%b已保存 Xray 偏好；以后将直接运行 Xray 脚本。%b\n\n' "$yellow" "$plain"
